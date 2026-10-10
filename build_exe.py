@@ -2,11 +2,17 @@
 # -*- coding: utf-8 -*-
 """一键把 DLNA 投屏器打成单个 exe（带图形界面）。
 
-    python build_exe.py                     # 直接出产物（不内嵌 ffmpeg）
+    python build_exe.py                     # 中文版，产物 dist/DLNA投屏器.exe
+    python build_exe.py --lang en           # 英文版，产物 dist/DLNACast.exe
     python build_exe.py --keep-build        # 保留中间产物便于排查
     python build_exe.py --embed-ffmpeg      # 【旧方案】把 ffmpeg 缀在 exe 尾部
 
-产物：dist/DLNA投屏器.exe（约 13 MB）
+产物：dist/DLNA投屏器.exe（中文，约 13 MB）/ dist/DLNACast.exe（英文）
+
+关于 --lang：语言不是运行时读取的配置，而是**构建期常量**。英文版会在包里
+写一个 _lang_build.py（内容只有一行 DEFAULT = "en"），i18n.py 启动时优先读它，
+所以用户双击就是英文界面，不需要先设环境变量。构建结束该文件立即清理，
+绝不留在工作区。运行时仍可用 --lang zh 或 DLNACAST_LANG=zh 覆盖回中文。
 
 关于 ffmpeg：为什么默认**不再内嵌**
 -------------------------------------
@@ -31,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,10 +46,15 @@ sys.path.insert(0, HERE)
 # ffpayload 只在 --embed-ffmpeg（旧方案）时才会用到，延迟导入，
 # 免得默认路径上多背一个模块的依赖。
 
-APP_NAME = "DLNA投屏器"
+APP_NAME = "DLNA投屏器"          # 中文版产物名
+EN_APP_NAME = "DLNACast"         # 英文版产物名（纯 ASCII，便于分享）
 SPEC = os.path.join(HERE, "screen-cast.spec")
 DIST_DIR = os.path.join(HERE, "dist")
+# 默认指向中文版；main() 会按 --lang 改写。后面所有引用都读这个模块级变量，
+# 所以两条语言分支不需要各自算一遍路径。
 DIST_EXE = os.path.join(DIST_DIR, APP_NAME + ".exe")
+# 构建期语言常量：写好后随包打进去，构建结束即清理（绝不留在工作区）
+LANG_BUILD_FILE = os.path.join(HERE, "_lang_build.py")
 BUILD_DIR = os.path.join(HERE, "build")
 # 旧产物不做删除，先改名堆到这个子目录，收尾时整体删掉
 RETIRED_DIR = os.path.join(DIST_DIR, "_retired")
@@ -207,31 +219,91 @@ def find_ffmpeg(explicit):
     raise SystemExit("找不到 ffmpeg。用 --ffmpeg <路径> 指定一个。")
 
 
-def write_version_info(path, ffmpeg_note):
-    """生成 Windows 版本资源，让 exe 的「属性」页有像样的信息。"""
-    text = """VSVersionInfo(
+def app_name_for(lang):
+    return EN_APP_NAME if lang == "en" else APP_NAME
+
+
+def write_lang_build(lang):
+    """写出构建期语言常量。
+
+    英文版 exe 的默认语言就定死在这个小文件里：i18n.py 启动时
+    ``from _lang_build import DEFAULT``，拿不到才回落到中文。用「构建期
+    常量」而不是环境变量，是为了让用户双击就有英文界面，不必先设什么。
+    """
+    with open(LANG_BUILD_FILE, "w", encoding="utf-8") as f:
+        f.write("# -*- coding: utf-8 -*-\n"
+                "# 由 build_exe.py 生成，构建结束即清理。请勿手改，也不入库。\n"
+                'DEFAULT = "%s"\n' % lang)
+    say("  语言常量 : _lang_build.py -> DEFAULT = %r" % lang)
+
+
+def dispose_lang_build():
+    """清理构建期语言常量。
+
+    走「改名挪走」而不是删除：本机环境的删除操作会被拦到回收站且必然
+    失败（见 retire()）。挪到系统临时目录就够 —— 关键是不能留在项目里
+    被 git 看见。
+    """
+    if not os.path.isfile(LANG_BUILD_FILE):
+        return
+    try:
+        tmp = os.path.join(tempfile.gettempdir(),
+                           "dlna_lang_build_%d.py" % int(time.time()))
+        os.rename(LANG_BUILD_FILE, tmp)
+        say("  已清理 _lang_build.py（挪到系统临时目录）")
+    except Exception as e:
+        say("  ! _lang_build.py 未能清理，请手动删除：%s" % e)
+
+
+def write_version_info(path, ffmpeg_note, lang="zh"):
+    """生成 Windows 版本资源，让 exe 的「属性」页有像样的信息。
+
+    注意生成的是一段 Python 字面量源码，字符串用单引号包裹，所以值里
+    不能再出现未转义的单引号（英文文案里最容易踩这个）。
+    英文版同时把字符串表的语言码从 0804(zh-CN) 换成 0409(en-US)。
+    """
+    if lang == "en":
+        table_lang, translation = "040904B0", "[1033, 1200]"
+        company = "Personal project"
+        desc = "DLNA Screen Caster - mirror this PC to a smart TV"
+        product = "DLNA Screen Caster"
+        orig = EN_APP_NAME + ".exe"
+    else:
+        table_lang, translation = "080404B0", "[2052, 1200]"
+        company = "个人项目"
+        desc = "DLNA 屏幕投屏器（把电脑画面投到智能电视）"
+        product = "DLNA 屏幕投屏器"
+        orig = APP_NAME + ".exe"
+
+    def q(s):
+        """按生成文件的需要转义：反斜杠与单引号。"""
+        return str(s).replace("\\", "\\\\").replace("'", "\\'")
+
+    text = ("""VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(1, 0, 0, 0), prodvers=(1, 0, 0, 0),
     mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
   ),
   kids=[
     StringFileInfo([
-      StringTable('080404B0', [
-        StringStruct('CompanyName', '个人项目'),
-        StringStruct('FileDescription', 'DLNA 屏幕投屏器（把电脑画面投到智能电视）'),
+      StringTable('%(table_lang)s', [
+        StringStruct('CompanyName', '%(company)s'),
+        StringStruct('FileDescription', '%(desc)s'),
         StringStruct('FileVersion', '1.0.0.0'),
         StringStruct('InternalName', 'DLNA-Cast'),
         StringStruct('LegalCopyright', ''),
-        StringStruct('OriginalFilename', 'DLNA投屏器.exe'),
-        StringStruct('ProductName', 'DLNA 屏幕投屏器'),
+        StringStruct('OriginalFilename', '%(orig)s'),
+        StringStruct('ProductName', '%(product)s'),
         StringStruct('ProductVersion', '1.0.0.0'),
-        StringStruct('Comments', '%s')
+        StringStruct('Comments', '%(note)s')
       ])
     ]),
-    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+    VarFileInfo([VarStruct('Translation', %(translation)s)])
   ]
 )
-""" % ffmpeg_note
+""" % {"table_lang": table_lang, "company": q(company), "desc": q(desc),
+       "orig": q(orig), "product": q(product), "note": q(ffmpeg_note),
+       "translation": translation})
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -273,7 +345,7 @@ def dll_search_dirs(python):
     return [c for c in cands if os.path.isdir(c)]
 
 
-def run_pyinstaller(python, ignore_dll_warnings=False):
+def run_pyinstaller(python, ignore_dll_warnings=False, app_name=None):
     cmd = [python, "-m", "PyInstaller",
            "--noconfirm", "--clean",
            "--distpath", os.path.join(HERE, "dist"),
@@ -281,6 +353,12 @@ def run_pyinstaller(python, ignore_dll_warnings=False):
            SPEC]
     say("  " + " ".join('"%s"' % c if " " in c else c for c in cmd))
     env = dict(os.environ)
+    # spec 从环境变量读产物名 —— 两条语言分支的 exe 文件名不同
+    # （中文版「DLNA投屏器.exe」/ 英文版 DLNACast.exe）。
+    # 不传的话 spec 会退回中文名，英文构建就会在「找产物」那步失败。
+    if app_name:
+        env["DLNACAST_APP_NAME"] = app_name
+        say("  产物名   : %s.exe" % app_name)
     extra = dll_search_dirs(python)
     if extra:
         say("  DLL 搜索路径前置：%s" % os.pathsep.join(extra))
@@ -319,7 +397,7 @@ def run_pyinstaller(python, ignore_dll_warnings=False):
         say("  ! 忽略 %d 条 DLL 警告（--ignore-dll-warnings）" % len(unresolved))
 
 
-def smoke_test(exe, expect_payload=None):
+def smoke_test(exe, expect_payload=None, expect_lang=None):
     """确认冻结后的 exe 真的能跑。
 
     这一步不能省：onefile 里少个数据文件、importlib 路径不对之类的问题，
@@ -327,6 +405,8 @@ def smoke_test(exe, expect_payload=None):
 
     expect_payload : True/False 校验 exe 尾部有没有 ffmpeg 载荷；
                      None 表示不检查（用于旧方案之外的场景）。
+    expect_lang    : "zh" / "en"，校验冻结后的默认界面语言是否正确
+                     （即 _lang_build.py 有没有真被收进包里）。
     """
     say("")
     say("  验证 1/3：PyInstaller 归档里有没有带上必需的资源")
@@ -355,13 +435,62 @@ def smoke_test(exe, expect_payload=None):
     say("  验证 3/3：exe 能否启动（跑 --help）")
     env = dict(os.environ)
     env["DLNACAST_NO_CONSOLE"] = "1"      # 免得冒出一个控制台窗口
+    # 清掉可能从父进程继承来的语言设置，否则测的是环境变量而不是包里的常量
+    env.pop("DLNACAST_LANG", None)
+    #
+    # 计时只看「到第一个字节输出」为止，不能等进程退出 —— 这是踩过的坑：
+    # onefile 的引导程序退出前要删掉 _MEI 解包目录（约 1000 个文件），
+    # 而某些受管环境把每个删除操作都拦到回收站，实测 500 个文件要 26.9 秒
+    # （对比：整个目录改名只要 0.005 秒）。于是「等进程退出」测到的其实是
+    # 一场删除马拉松，能到 70 秒，跟真实启动速度毫无关系。
+    # 用户能感知的是「双击后多久看到东西」，即首字节输出时刻。
     t0 = time.time()
-    r = subprocess.run([exe, "--help"], capture_output=True, timeout=180, env=env)
-    if r.returncode != 0:
-        raise SystemExit("exe 启动失败（返回码 %s）\nstderr:\n%s"
-                         % (r.returncode, r.stderr.decode("utf-8", "replace")[-2000:]))
-    say("    启动正常，用时 %.1f 秒（冻结后的解释器+核心模块都加载成功）"
-        % (time.time() - t0))
+    proc = subprocess.Popen([exe, "--help"], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=env)
+    first = []
+    chunks = []
+
+    def _pump():
+        try:
+            while True:
+                # 用 os.read：一有数据就返回，不会像 read(n) 那样攒满才回
+                b = os.read(proc.stdout.fileno(), 4096)
+                if not b:
+                    break
+                if not first:
+                    first.append(time.time() - t0)
+                chunks.append(b)
+        except OSError:
+            pass
+
+    th = threading.Thread(target=_pump, daemon=True)
+    th.start()
+    proc.wait(timeout=600)
+    th.join(timeout=15)
+    launch = first[0] if first else (time.time() - t0)
+    out = b"".join(chunks).decode("utf-8", "replace")
+    tail = time.time() - t0
+
+    if proc.returncode != 0:
+        raise SystemExit("exe 启动失败（返回码 %s）\n输出:\n%s"
+                         % (proc.returncode, out[-2000:]))
+    say("    启动正常，首字节输出用时 %.1f 秒"
+        "（冻结后的解释器+核心模块都加载成功）" % launch)
+    if tail - launch > 5:
+        # 差得多说明是解包目录的删除被拖慢，不是启动慢 —— 说清楚免得误判
+        say("    （进程完全退出用了 %.0f 秒，多出来的是 onefile 解包目录的"
+            "清理，与启动速度无关）" % tail)
+
+    if expect_lang:
+        want = {"en": "DLNA Screen Caster", "zh": "DLNA 屏幕投屏器"}[expect_lang]
+        if not out.strip():
+            # GUI 子系统的 exe 在某些环境下拿不到 stdout，这不是失败
+            say("    （未捕获到 --help 文本，跳过语言校验）")
+        elif want in out:
+            say("    默认语言校验通过：%s" % want)
+        else:
+            raise SystemExit("默认语言不对：期望帮助里出现 %r，实际输出：\n%s"
+                             % (want, out[-1500:]))
 
 
 def test_runtime_ffmpeg():
@@ -411,7 +540,12 @@ def main():
                     help="--embed-ffmpeg 时不用 7-Zip 加速")
     ap.add_argument("--ignore-dll-warnings", action="store_true",
                     help="忽略未解析的依赖 DLL 警告（慎用，通常代表产物会崩）")
+    ap.add_argument("--lang", choices=["zh", "en"], default="zh",
+                    help="界面语言：zh = 中文版（默认）/ en = 英文版")
     args = ap.parse_args()
+
+    global DIST_EXE
+    DIST_EXE = os.path.join(DIST_DIR, app_name_for(args.lang) + ".exe")
 
     embed = args.embed_ffmpeg
     total = 5
@@ -427,11 +561,21 @@ def main():
     else:
         say("  模式     : 纯 exe，ffmpeg 运行时解析/按需下载")
     say("  项目目录 : %s" % HERE)
+    say("  界面语言 : %s"
+        % ("英文版 (en)" if args.lang == "en" else "中文版 (zh)"))
+    write_lang_build(args.lang)
     icon = make_icon()
     say("  应用图标 : %s" % (icon or "（无）"))
-    note = ("内嵌 ffmpeg：%s" % os.path.basename(ffmpeg_src)) if embed \
-        else "ffmpeg：运行时自动查找（FFMPEG_PATH / 同目录 / PATH），必要时从 GitHub 下载"
-    write_version_info(os.path.join(HERE, "assets", "version_info.txt"), note)
+    if embed:
+        note = "内嵌 ffmpeg：%s" % os.path.basename(ffmpeg_src)
+    elif args.lang == "en":
+        note = ("ffmpeg: resolved at runtime (FFMPEG_PATH / same folder / "
+                "PATH), downloaded from GitHub if needed")
+    else:
+        note = ("ffmpeg：运行时自动查找（FFMPEG_PATH / 同目录 / PATH），"
+                "必要时从 GitHub 下载")
+    write_version_info(os.path.join(HERE, "assets", "version_info.txt"), note,
+                       args.lang)
     python, installed = ensure_toolchain(need_icon=icon is None)
     say("  解释器   : %s" % python)
     if installed:
@@ -444,7 +588,8 @@ def main():
         _dispose_dir(BUILD_DIR)
 
     step(3, total, "PyInstaller 打包")
-    run_pyinstaller(python, ignore_dll_warnings=args.ignore_dll_warnings)
+    run_pyinstaller(python, ignore_dll_warnings=args.ignore_dll_warnings,
+                    app_name=app_name_for(args.lang))
     if not os.path.isfile(DIST_EXE):
         raise SystemExit("没有找到产物：%s" % DIST_EXE)
     bare = os.path.getsize(DIST_EXE)
@@ -463,13 +608,13 @@ def main():
             say("  已按 --skip-test 跳过验证")
         else:
             sub("验证内嵌后的产物")
-            smoke_test(DIST_EXE, expect_payload=True)
+            smoke_test(DIST_EXE, expect_payload=True, expect_lang=args.lang)
     else:
         step(4, total, "验证")
         if args.skip_test:
             say("  已按 --skip-test 跳过")
         else:
-            smoke_test(DIST_EXE, expect_payload=False)
+            smoke_test(DIST_EXE, expect_payload=False, expect_lang=args.lang)
 
     step(5, total, "完成")
     if not args.keep_build:
@@ -495,8 +640,18 @@ def main():
         say("说明：exe 启动时按下面的顺序找 ffmpeg，找不到才联网下载：")
         say("      FFMPEG_PATH  →  exe 同目录  →  %%LOCALAPPDATA%%\\DlnaCast\\bin")
         say("      →  常见安装路径  →  PATH  →  GitHub（下到 exe 同目录）")
+    if args.lang == "en":
+        say("")
+        say("Note: this build defaults to the English UI. Users can still")
+        say("      force Chinese at runtime with  --lang zh  or  set DLNACAST_LANG=zh .")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # _lang_build.py 是构建期临时文件，无论成功失败都必须清掉 —— 否则它会
+    # 留在工作区里被 git 看见，而且下一次构建的语言会被它悄悄污染。
+    try:
+        _code = main()
+    finally:
+        dispose_lang_build()
+    sys.exit(_code)

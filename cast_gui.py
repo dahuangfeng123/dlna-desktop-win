@@ -24,6 +24,11 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import ffmpeg_fetch  # noqa: E402
+import i18n  # noqa: E402
+
+# 界面文案一律走 i18n.tr()（短名 T）。中文表命中就换英文，查不到原样返回，
+# 所以中文版的行为跟改造前完全一致。
+T = i18n.T
 
 
 # ------------------------------------------------------------------ 环境准备
@@ -96,8 +101,8 @@ def _mmss(seconds):
     except Exception:
         return "?"
     if s < 60:
-        return "%d 秒" % s
-    return "%d 分 %02d 秒" % (s // 60, s % 60)
+        return T("%d 秒") % s
+    return T("%d 分 %02d 秒") % (s // 60, s % 60)
 
 
 def load_core():
@@ -114,7 +119,7 @@ def load_core():
     base = getattr(sys, "_MEIPASS", None) or _HERE
     path = os.path.join(base, "screen-cast.py")
     if not os.path.isfile(path):
-        raise IOError("找不到投屏核心文件：%s" % path)
+        raise IOError(T("找不到投屏核心文件：%s") % path)
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
@@ -137,7 +142,7 @@ def _install_crash_handler(cache_dir):
             pass
         try:
             import tkinter.messagebox as mb
-            mb.showerror("DLNA 投屏器 出错", text[-1500:])
+            mb.showerror(T("DLNA 投屏器 出错"), text[-1500:])
         except Exception:
             pass
 
@@ -152,23 +157,35 @@ def build_gui(core):
     from tkinter import ttk, messagebox
     from tkinter.scrolledtext import ScrolledText
 
+    # 英文界面用 Segoe UI（Windows 自带的西文字体，比微软雅黑好看）；
+    # 中文界面仍用微软雅黑。两个字体在两种语言的 Windows 上都有。
+    UI_FONT = "Segoe UI" if i18n.is_en() else "Microsoft YaHei UI"
+    # 下拉框宽度（字符数）。英文描述比中文长，窄了会被截断成 "Auto (recomm…"
+    _EN = i18n.is_en()
+    W_LBL = 15 if _EN else 10      # 左侧标签列
+    W_Q = 46 if _EN else 44        # 画质档位
+    W_ENC = 42 if _EN else 36      # 视频编码
+    W_CAP = 42 if _EN else 34      # 采集后端
+
     # ---- 选项文案 ↔ 内部取值 的映射（界面说人话，代码收短标识）----
+    # 文案在**构造时**就翻译好，后面的 label_of()/value_of() 拿到的是一致
+    # 的字符串，映射关系不受语言影响。
     ENCODERS = [
-        ("自动（推荐：优先硬件，失败自动退软编）", "auto"),
-        ("硬件编码 h264_mf（几乎不占 CPU）", "mf"),
-        ("软件编码 x264（帧率最稳、画质最实）", "x264"),
+        (T("自动（推荐：优先硬件，失败自动退软编）"), "auto"),
+        (T("硬件编码 h264_mf（几乎不占 CPU）"), "mf"),
+        (T("软件编码 x264（帧率最稳、画质最实）"), "x264"),
     ]
     CAPTURES = [
-        ("自动（推荐）", "auto"),
-        ("GDI 抓屏 gdigrab（兼容性最好）", "gdigrab"),
-        ("桌面复制 ddagrab（CPU 占用低、帧率上限高）", "ddagrab"),
+        (T("自动（推荐）"), "auto"),
+        (T("GDI 抓屏 gdigrab（兼容性最好）"), "gdigrab"),
+        (T("桌面复制 ddagrab（CPU 占用低、帧率上限高）"), "ddagrab"),
     ]
     AUDIOS = [
-        ("跟随系统声音（推荐，声音从电视出）", "loopback"),
-        ("不要声音", "none"),
+        (T("跟随系统声音（推荐，声音从电视出）"), "loopback"),
+        (T("不要声音"), "none"),
     ]
-    MODES = [("MPEG-TS 直播（推荐，延迟低）", "mpegts"),
-             ("HLS 分片（兼容优先，延迟高）", "hls")]
+    MODES = [(T("MPEG-TS 直播（推荐，延迟低）"), "mpegts"),
+             (T("HLS 分片（兼容优先，延迟高）"), "hls")]
     FPS_ITEMS = ["24", "25", "30", "50", "60"]
 
     def label_of(pairs, value):
@@ -183,11 +200,11 @@ def build_gui(core):
                 return v
         return pairs[0][1]
 
-    quality_texts = ["%s" % core.QUALITY_LABELS[k] for k in core.QUALITY_ORDER]
+    quality_texts = [T(core.QUALITY_LABELS[k]) for k in core.QUALITY_ORDER]
 
     # ---- 窗口骨架 ----
     root = tk.Tk()
-    root.title("DLNA 屏幕投屏器")
+    root.title(T("DLNA 屏幕投屏器"))
     root.minsize(800, 620)
 
     try:
@@ -210,82 +227,82 @@ def build_gui(core):
     # ================= 顶部：标题 + 本机信息 =================
     head = ttk.Frame(outer)
     head.pack(fill="x")
-    ttk.Label(head, text="DLNA 屏幕投屏器",
-              font=("Microsoft YaHei UI", 15, "bold")).pack(anchor="w")
+    ttk.Label(head, text=T("DLNA 屏幕投屏器"),
+              font=(UI_FONT, 15, "bold")).pack(anchor="w")
     # 环境信息单独占一行：放在标题右侧会被窗口宽度截断，
     # 而 IP / 分辨率恰恰是排查问题时要看的
-    ui["env_label"] = ttk.Label(head, text="正在检查运行环境 ...",
+    ui["env_label"] = ttk.Label(head, text=T("正在检查运行环境 ..."),
                                 foreground="#666666")
     ui["env_label"].pack(anchor="w")
 
     # ================= 投屏目标 =================
-    lf_dev = ttk.LabelFrame(outer, text=" 投屏目标 ", padding=10)
+    lf_dev = ttk.LabelFrame(outer, text=T(" 投屏目标 "), padding=10)
     lf_dev.pack(fill="x", pady=(10, 0))
 
     row = ttk.Frame(lf_dev)
     row.pack(fill="x")
-    ttk.Label(row, text="电视设备", width=10).pack(side="left")
+    ttk.Label(row, text=T("电视设备"), width=W_LBL).pack(side="left")
     ui["dev_combo"] = ttk.Combobox(row, state="readonly", width=48,
-                                   values=["（尚未扫描）"])
+                                   values=[T("（尚未扫描）")])
     ui["dev_combo"].current(0)
     ui["dev_combo"].pack(side="left", fill="x", expand=True, padx=(0, 8))
-    ui["btn_scan"] = ttk.Button(row, text="扫描设备", width=10,
+    ui["btn_scan"] = ttk.Button(row, text=T("扫描设备"), width=12,
                                 command=lambda: on_scan())
     ui["btn_scan"].pack(side="left")
 
     row2 = ttk.Frame(lf_dev)
     row2.pack(fill="x", pady=(8, 0))
-    ttk.Label(row2, text="手动指定", width=10).pack(side="left")
+    ttk.Label(row2, text=T("手动指定"), width=W_LBL).pack(side="left")
     ui["ip_entry"] = ttk.Entry(row2, width=20)
     ui["ip_entry"].pack(side="left")
-    ttk.Label(row2, text="  电视 IP（填了就跳过扫描，如 192.168.1.100）",
+    ttk.Label(row2, text=T("  电视 IP（填了就跳过扫描，如 192.168.1.100）"),
               foreground="#666666").pack(side="left")
 
     # ================= 画质与性能 =================
-    lf_q = ttk.LabelFrame(outer, text=" 画质与性能 ", padding=10)
+    lf_q = ttk.LabelFrame(outer, text=T(" 画质与性能 "), padding=10)
     lf_q.pack(fill="x", pady=(10, 0))
 
     r1 = ttk.Frame(lf_q)
     r1.pack(fill="x")
-    ttk.Label(r1, text="画质档位", width=10).pack(side="left")
-    ui["quality"] = ttk.Combobox(r1, state="readonly", width=44,
+    ttk.Label(r1, text=T("画质档位"), width=W_LBL).pack(side="left")
+    ui["quality"] = ttk.Combobox(r1, state="readonly", width=W_Q,
                                  values=quality_texts)
-    ui["quality"].set(core.QUALITY_LABELS["1080hq"])
+    ui["quality"].set(T(core.QUALITY_LABELS["1080hq"]))
     ui["quality"].pack(side="left")
-    ttk.Label(r1, text="   帧率").pack(side="left")
+    ttk.Label(r1, text=T("   帧率")).pack(side="left")
     ui["fps"] = ttk.Combobox(r1, state="readonly", width=6, values=FPS_ITEMS)
     ui["fps"].set("30")
     ui["fps"].pack(side="left", padx=(6, 0))
 
     r2 = ttk.Frame(lf_q)
     r2.pack(fill="x", pady=(8, 0))
-    ttk.Label(r2, text="视频编码", width=10).pack(side="left")
-    ui["encoder"] = ttk.Combobox(r2, state="readonly", width=36,
+    ttk.Label(r2, text=T("视频编码"), width=W_LBL).pack(side="left")
+    ui["encoder"] = ttk.Combobox(r2, state="readonly", width=W_ENC,
                                  values=[t for t, _ in ENCODERS])
     ui["encoder"].set(ENCODERS[0][0])
     ui["encoder"].pack(side="left")
-    ttk.Label(r2, text="   采集").pack(side="left")
-    ui["capture"] = ttk.Combobox(r2, state="readonly", width=34,
+    ttk.Label(r2, text=T("   采集")).pack(side="left")
+    ui["capture"] = ttk.Combobox(r2, state="readonly", width=W_CAP,
                                  values=[t for t, _ in CAPTURES])
     ui["capture"].set(CAPTURES[0][0])
     ui["capture"].pack(side="left", padx=(6, 0))
 
     # ================= 高级设置（默认收起） =================
     ui["adv_shown"] = tk.BooleanVar(value=False)
-    ui["btn_adv"] = ttk.Button(outer, text="▸  高级设置（一般不用改）",
+    ui["btn_adv"] = ttk.Button(outer, text=T("▸  高级设置（一般不用改）"),
                                command=lambda: toggle_adv())
     ui["btn_adv"].pack(fill="x", pady=(8, 0))
 
-    lf_adv = ttk.LabelFrame(outer, text=" 高级设置 ", padding=10)
+    lf_adv = ttk.LabelFrame(outer, text=T(" 高级设置 "), padding=10)
 
     g = ttk.Frame(lf_adv)
     g.pack(fill="x")
     specs = [
-        ("port", "HTTP 端口", "8899", 8),
-        ("latency_ms", "本机缓冲 ms", "300", 8),
-        ("gop_ms", "关键帧间隔 ms", "500", 8),
-        ("lead_ms", "发送节流 ms", "800", 8),
-        ("bitrate", "手动码率 kbps", "0", 10),
+        ("port", T("HTTP 端口"), "8899", 8),
+        ("latency_ms", T("本机缓冲 ms"), "300", 8),
+        ("gop_ms", T("关键帧间隔 ms"), "500", 8),
+        ("lead_ms", T("发送节流 ms"), "800", 8),
+        ("bitrate", T("手动码率 kbps"), "0", 10),
     ]
     for i, (key, text, default, width) in enumerate(specs):
         col = ttk.Frame(g)
@@ -295,18 +312,18 @@ def build_gui(core):
         e.insert(0, default)
         e.pack(anchor="w")
         ui[key] = e
-    ttk.Label(g, text="(手动码率 0 = 用档位默认值)",
+    ttk.Label(g, text=T("(手动码率 0 = 用档位默认值)"),
               foreground="#666666").grid(row=0, column=len(specs), sticky="sw")
 
     r3 = ttk.Frame(lf_adv)
     r3.pack(fill="x", pady=(10, 0))
-    ttk.Label(r3, text="推流模式", width=10).pack(side="left")
-    ui["mode"] = ttk.Combobox(r3, state="readonly", width=32,
+    ttk.Label(r3, text=T("推流模式"), width=W_LBL).pack(side="left")
+    ui["mode"] = ttk.Combobox(r3, state="readonly", width=W_CAP,
                               values=[t for t, _ in MODES])
     ui["mode"].set(MODES[0][0])
     ui["mode"].pack(side="left")
-    ttk.Label(r3, text="   声音来源").pack(side="left")
-    ui["audio"] = ttk.Combobox(r3, state="readonly", width=30,
+    ttk.Label(r3, text=T("   声音来源")).pack(side="left")
+    ui["audio"] = ttk.Combobox(r3, state="readonly", width=W_CAP,
                                values=[t for t, _ in AUDIOS])
     ui["audio"].set(AUDIOS[0][0])
     ui["audio"].pack(side="left", padx=(6, 0))
@@ -314,11 +331,11 @@ def build_gui(core):
     r4 = ttk.Frame(lf_adv)
     r4.pack(fill="x", pady=(10, 0))
     checks = [
-        ("no_osd_inv", "在电视画面右上角显示帧率 / 码率 / 延迟", True),
-        ("low_latency", "流畅优先预设（软编 + 更小缓冲，帧率最稳）", False),
-        ("allow_upscale", "允许把画面放大到档位分辨率（通常没必要）", False),
-        ("clock", "同时打开延迟诊断时钟页（用于量端到端延迟）", False),
-        ("no_push", "仅在本机自测，不推送到电视", False),
+        ("no_osd_inv", T("在电视画面右上角显示帧率 / 码率 / 延迟"), True),
+        ("low_latency", T("流畅优先预设（软编 + 更小缓冲，帧率最稳）"), False),
+        ("allow_upscale", T("允许把画面放大到档位分辨率（通常没必要）"), False),
+        ("clock", T("同时打开延迟诊断时钟页（用于量端到端延迟）"), False),
+        ("no_push", T("仅在本机自测，不推送到电视"), False),
     ]
     ui["checks"] = {}
     for key, text, default in checks:
@@ -328,21 +345,21 @@ def build_gui(core):
         ui["checks"][key] = v
 
     ttk.Label(lf_adv,
-              text="提示：电视端卡顿时，把「手动码率」调到比实测交付速率低 15% 左右即可。",
+              text=T("提示：电视端卡顿时，把「手动码率」调到比实测交付速率低 15% 左右即可。"),
               foreground="#666666").pack(anchor="w", pady=(8, 0))
 
     # ================= 操作区 =================
     act = ttk.Frame(outer)
     act.pack(fill="x", pady=(10, 0))
-    ui["btn_start"] = ttk.Button(act, text="▶  开始投屏", width=18,
+    ui["btn_start"] = ttk.Button(act, text=T("▶  开始投屏"), width=18,
                                  command=lambda: on_start())
     ui["btn_start"].pack(side="left")
-    ui["btn_stop"] = ttk.Button(act, text="■  停止", width=12, state="disabled",
-                                command=lambda: on_stop())
+    ui["btn_stop"] = ttk.Button(act, text=T("■  停止"), width=13,
+                                state="disabled", command=lambda: on_stop())
     ui["btn_stop"].pack(side="left", padx=(8, 0))
     ui["progress"] = ttk.Progressbar(act, mode="indeterminate", length=150)
     ui["progress"].pack(side="left", padx=(16, 0))
-    ui["status"] = ttk.Label(act, text="就绪", foreground="#1a5fb4")
+    ui["status"] = ttk.Label(act, text=T("就绪"), foreground="#1a5fb4")
     ui["status"].pack(side="left", padx=(12, 0))
 
     # 电视端低延迟播放页地址（推流成功后才出现）
@@ -350,16 +367,17 @@ def build_gui(core):
     tvrow.pack(fill="x", pady=(8, 0))
     ui["tv_label"] = ttk.Label(
         tvrow,
-        text="电视端低延迟播放页：开始投屏后这里会显示地址"
-             "（在电视浏览器里打开，可把延迟从几秒压到 1 秒内）",
+        text=T("电视端低延迟播放页：开始投屏后这里会显示地址"
+               "（在电视浏览器里打开，可把延迟从几秒压到 1 秒内）"),
         foreground="#777777")
     ui["tv_label"].pack(side="left")
-    ui["btn_copy"] = ttk.Button(tvrow, text="复制地址", width=10,
+    ui["btn_copy"] = ttk.Button(tvrow, text=T("复制地址"),
+                                width=14 if _EN else 10,
                                 state="disabled", command=lambda: on_copy())
     ui["btn_copy"].pack(side="right")
 
     # ================= 日志 =================
-    lf_log = ttk.LabelFrame(outer, text=" 运行日志 ", padding=6)
+    lf_log = ttk.LabelFrame(outer, text=T(" 运行日志 "), padding=6)
     lf_log.pack(fill="both", expand=True, pady=(10, 0))
     ui["log"] = ScrolledText(lf_log, height=8, wrap="word",
                              font=("Consolas", 9), state="disabled",
@@ -402,6 +420,9 @@ def build_gui(core):
 
     def log_line(text, is_err=False):
         """只从主线程调用。"""
+        # 最后一道翻译：核心模块的 log 已翻过一遍，这里覆盖 GUI 自己与
+        # ffmpeg_fetch 回调送来的文本。tr() 幂等，重复翻不会出错。
+        text = i18n.tr(text)
         w = ui["log"]
         w.configure(state="normal")
         w.insert("end", text + "\n", ("err",) if is_err else ())
@@ -416,7 +437,7 @@ def build_gui(core):
         st["q"].put(("log", (text, is_err)))
 
     def set_status(text, color="#1a5fb4"):
-        ui["status"].configure(text=text, foreground=color)
+        ui["status"].configure(text=i18n.tr(text), foreground=color)
 
     def drain():
         try:
@@ -440,8 +461,8 @@ def build_gui(core):
                             spd = payload[2]
                             left = (total - done) / max(0.001, spd)
                             set_status(
-                                "正在下载 ffmpeg  %.1f / %.1f MB（%.0f%%，"
-                                "%.2f MB/s，剩余约 %s）"
+                                T("正在下载 ffmpeg  %.1f / %.1f MB（%.0f%%，"
+                                  "%.2f MB/s，剩余约 %s）")
                                 % (done / 1048576, total / 1048576,
                                    done * 100.0 / total, spd / 1048576,
                                    _mmss(left)), "#a35a00")
@@ -451,10 +472,10 @@ def build_gui(core):
                     elif kind == "dl_state":
                         # 下载开始/结束：把「停止」按钮借去当「取消下载」
                         if payload:
-                            ui["btn_stop"].configure(text="■  取消下载",
+                            ui["btn_stop"].configure(text=T("■  取消下载"),
                                                      state="normal")
                         else:
-                            ui["btn_stop"].configure(text="■  停止",
+                            ui["btn_stop"].configure(text=T("■  停止"),
                                                      state="disabled")
                     elif kind == "env":
                         ui["env_label"].configure(text=payload)
@@ -462,7 +483,7 @@ def build_gui(core):
                         fill_devices(payload)
                 except Exception as e:
                     # 单个消息出错不能把整个消息泵带走
-                    log_line("界面刷新出错：%s" % e, True)
+                    log_line(T("界面刷新出错：%s") % e, True)
         except queue.Empty:
             pass
         root.after(120, drain)
@@ -476,7 +497,7 @@ def build_gui(core):
         ui["progress"].stop()
         ui["progress"].configure(mode="indeterminate")
         if not devices:
-            ui["dev_combo"].configure(values=["（未发现设备）"])
+            ui["dev_combo"].configure(values=[T("（未发现设备）")])
             ui["dev_combo"].current(0)
             try:
                 diag = core.network_diagnosis()
@@ -503,7 +524,7 @@ def build_gui(core):
                 devs = core.scan_devices(
                     4.0, log_fn=lambda m: st["q"].put(("log", (m, False))))
             except Exception as e:
-                st["q"].put(("log", ("扫描失败：%s" % e, True)))
+                st["q"].put(("log", (T("扫描失败：%s") % e, True)))
                 devs = []
             st["q"].put(("devices", devs))
 
@@ -518,7 +539,7 @@ def build_gui(core):
         try:
             return int(float(raw))
         except ValueError:
-            raise ValueError("「%s」要填数字，当前是「%s」" % (name, raw))
+            raise ValueError(T("「%s」要填数字，当前是「%s」") % (name, raw))
 
     def collect_config():
         cfg = core.CastConfig()
@@ -529,11 +550,11 @@ def build_gui(core):
         cfg.capture = value_of(CAPTURES, ui["capture"].get())
         cfg.mode = value_of(MODES, ui["mode"].get())
         cfg.audio = value_of(AUDIOS, ui["audio"].get())
-        cfg.port = _int_of(ui["port"], "HTTP 端口", 8899)
-        cfg.latency_ms = _int_of(ui["latency_ms"], "本机缓冲", 300)
-        cfg.gop_ms = _int_of(ui["gop_ms"], "关键帧间隔", 500)
-        cfg.lead_ms = _int_of(ui["lead_ms"], "发送节流", 800)
-        cfg.bitrate = _int_of(ui["bitrate"], "手动码率", 0)
+        cfg.port = _int_of(ui["port"], T("HTTP 端口"), 8899)
+        cfg.latency_ms = _int_of(ui["latency_ms"], T("本机缓冲"), 300)
+        cfg.gop_ms = _int_of(ui["gop_ms"], T("关键帧间隔"), 500)
+        cfg.lead_ms = _int_of(ui["lead_ms"], T("发送节流"), 800)
+        cfg.bitrate = _int_of(ui["bitrate"], T("手动码率"), 0)
         cfg.no_osd = not ui["checks"]["no_osd_inv"].get()
         cfg.low_latency = ui["checks"]["low_latency"].get()
         cfg.allow_upscale = ui["checks"]["allow_upscale"].get()
@@ -548,7 +569,7 @@ def build_gui(core):
             if not st["devices"] or idx < 0 or idx >= len(st["devices"]):
                 if not cfg.no_push:
                     raise ValueError(
-                        "还没选电视。点「扫描设备」，或在上面的「手动指定」里填电视 IP。")
+                        T("还没选电视。点「扫描设备」，或在上面的「手动指定」里填电视 IP。"))
             else:
                 cfg.ip = st["devices"][idx].ip
         return cfg
@@ -561,7 +582,7 @@ def build_gui(core):
         try:
             cfg = collect_config()
         except ValueError as e:
-            messagebox.showwarning("参数需要调整", str(e))
+            messagebox.showwarning(T("参数需要调整"), str(e))
             return
 
         st["tv_url"] = ""
@@ -588,7 +609,7 @@ def build_gui(core):
                     ready_cb=lambda info: st["q"].put(("ready", info)))
             except Exception as e:
                 import traceback
-                st["q"].put(("log", ("发生异常：%s" % e, True)))
+                st["q"].put(("log", (T("发生异常：%s") % e, True)))
                 st["q"].put(("log", (traceback.format_exc(), True)))
                 code = -1
             finally:
@@ -619,10 +640,10 @@ def build_gui(core):
         st["tv_url"] = url or ""
         if url:
             ui["tv_label"].configure(
-                text="电视端低延迟播放页：%s   （在电视浏览器里打开，点「开始播放」）" % url,
+                text=T("电视端低延迟播放页：%s   （在电视浏览器里打开，点「开始播放」）") % url,
                 foreground="#0f6b3a", font=("Consolas", 10))
             ui["btn_copy"].configure(state="normal")
-        set_status("投屏中 · %s" % info.get("device", ""), "#0f6b3a")
+        set_status(T("投屏中 · %s") % info.get("device", ""), "#0f6b3a")
 
     def on_done(code):
         st["running"] = False
@@ -636,7 +657,7 @@ def build_gui(core):
         if code == 0:
             set_status("已停止", "#444444")
         else:
-            set_status("已结束（退出码 %s）" % code, "#a30000")
+            set_status(T("已结束（退出码 %s）") % code, "#a30000")
 
     def on_copy():
         if not st["tv_url"]:
@@ -648,12 +669,12 @@ def build_gui(core):
     def toggle_adv():
         if ui["adv_shown"].get():
             lf_adv.pack_forget()
-            ui["btn_adv"].configure(text="▸  高级设置（一般不用改）")
+            ui["btn_adv"].configure(text=T("▸  高级设置（一般不用改）"))
             ui["adv_shown"].set(False)
         else:
             # 插到「开始投屏」按钮之前，保持视觉顺序
             lf_adv.pack(fill="x", pady=(8, 0), before=act)
-            ui["btn_adv"].configure(text="▾  高级设置（一般不用改）")
+            ui["btn_adv"].configure(text=T("▾  高级设置（一般不用改）"))
             ui["adv_shown"].set(True)
 
     # ---------------------------------------------------------- 关闭
@@ -663,9 +684,9 @@ def build_gui(core):
     def on_close():
         if st["running"] and not closing["asked"]:
             if not messagebox.askokcancel(
-                    "正在投屏",
-                    "投屏还在进行。确定要停止并退出吗？\n\n"
-                    "（会先停止投屏、恢复电脑本地声音，再关闭窗口）"):
+                    T("正在投屏"),
+                    T("投屏还在进行。确定要停止并退出吗？\n\n"
+                      "（会先停止投屏、恢复电脑本地声音，再关闭窗口）")):
                 return
             closing["asked"] = True
             st["stop_event"].set()
@@ -723,7 +744,7 @@ def build_gui(core):
                 cancel=cancel_ev.is_set,
             )
         except Exception as e:
-            path, desc = None, "环境自检失败：%s" % e
+            path, desc = None, T("环境自检失败：%s") % e
         finally:
             st["downloading"] = False
             st["q"].put(("dl_state", False))
@@ -733,37 +754,37 @@ def build_gui(core):
             st["ffmpeg_ok"] = bool(path)
 
             if path:
-                st["q"].put(("log", ("ffmpeg 就绪：%s" % path, False)))
+                st["q"].put(("log", (T("ffmpeg 就绪：%s") % path, False)))
             else:
-                st["q"].put(("log", ("没有可用的 ffmpeg —— 投屏会失败。", True)))
+                st["q"].put(("log", (T("没有可用的 ffmpeg —— 投屏会失败。"), True)))
                 st["q"].put(("log", (desc, True)))
                 st["q"].put(("log", (
-                    "可以这样解决：① 装一份 ffmpeg 并把它的 bin 目录加进 PATH；"
-                    "② 设环境变量 FFMPEG_PATH 指向 ffmpeg.exe；"
-                    "③ 直接把 ffmpeg.exe 放到本程序旁边（%s）"
+                    T("可以这样解决：① 装一份 ffmpeg 并把它的 bin 目录加进 PATH；"
+                      "② 设环境变量 FFMPEG_PATH 指向 ffmpeg.exe；"
+                      "③ 直接把 ffmpeg.exe 放到本程序旁边（%s）")
                     % core.APP_DIR, True)))
 
             ip = core.get_local_ip()
             sz = core.get_desktop_size()
             if not path:
-                ff_desc = "未找到 ffmpeg"
+                ff_desc = T("未找到 ffmpeg")
             elif desc.startswith("本机已有"):
-                ff_desc = "使用本机 ffmpeg"
+                ff_desc = T("使用本机 ffmpeg")
             else:
-                ff_desc = "已下载 ffmpeg"
+                ff_desc = T("已下载 ffmpeg")
             # 端口可能被 Windows 的保留区间吞掉（见 screen-cast.start_http_server），
             # 所以自检就按「实际会绑上的端口」显示，免得给出一个连不上的地址。
             try:
                 _port = core.pick_http_port(core.DEFAULT_HTTP_PORT)
             except Exception:
                 _port = core.DEFAULT_HTTP_PORT
-            st["q"].put(("env", "本机 %s   ·   桌面 %s   ·   端口 %d   ·   %s"
-                         % (ip, ("%d×%d" % sz) if sz else "未知",
+            st["q"].put(("env", T("本机 %s   ·   桌面 %s   ·   端口 %d   ·   %s")
+                         % (ip, ("%d×%d" % sz) if sz else T("未知"),
                             _port, ff_desc)))
             if _port != core.DEFAULT_HTTP_PORT:
-                st["q"].put(("log", ("端口 %d 不可用，将自动改用 %d"
+                st["q"].put(("log", (T("端口 %d 不可用，将自动改用 %d")
                                      % (core.DEFAULT_HTTP_PORT, _port), False)))
-            st["q"].put(("log", ("本机 IP %s / 桌面 %s / 端口 %d"
+            st["q"].put(("log", (T("本机 IP %s / 桌面 %s / 端口 %d")
                                  % (ip, sz, _port), False)))
             # 代理的 TUN 模式会吃掉 DLNA 组播 —— 开机自检就提醒，别等扫不到才说
             try:
@@ -772,8 +793,8 @@ def build_gui(core):
                 _tuns = []
             if _tuns:
                 st["q"].put(("log", (
-                    "★ 检测到代理 TUN 虚拟网卡「%s」在运行。"
-                    "若扫描不到电视，请把局域网加入代理绕过，或临时关闭 TUN 模式。"
+                    T("★ 检测到代理 TUN 虚拟网卡「%s」在运行。"
+                      "若扫描不到电视，请把局域网加入代理绕过，或临时关闭 TUN 模式。")
                     % "、".join(_tuns), False)))
             if path:
                 st["q"].put(("status", ("就绪 —— 先扫描设备，再点「开始投屏」", "#1a5fb4")))
@@ -781,7 +802,7 @@ def build_gui(core):
                 st["q"].put(("status", ("缺少 ffmpeg，无法投屏", "#a30000")))
         except Exception as e:
             import traceback
-            st["q"].put(("log", ("环境自检出错：%s" % e, True)))
+            st["q"].put(("log", (T("环境自检出错：%s") % e, True)))
             st["q"].put(("log", (traceback.format_exc(), True)))
             st["q"].put(("status", ("自检失败", "#a30000")))
         finally:
@@ -801,6 +822,8 @@ def build_gui(core):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     _ensure_streams()
+    # 语言必须在建界面之前定下来：控件文案是构造时求值的，晚一步就晚了。
+    i18n.set_lang(i18n.resolve(argv))
 
     # 带参数 → 命令行形态：临时开控制台，走原始命令行逻辑
     if argv:

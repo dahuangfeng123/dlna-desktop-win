@@ -1,5 +1,7 @@
 # DLNA 桌面投屏器（Windows）
 
+[English](README.en.md) | **简体中文**
+
 把 Windows 桌面**实时投到局域网智能电视**。电视端零安装、不依赖 Miracast、不需要 HDMI 线或电视盒子。
 
 程序用 ffmpeg 采集屏幕与系统声音 → H.264 编码 → MPEG-TS 封装 → 由内置 HTTP 服务输出 → 通过 UPnP `AVTransport` 让电视主动拉流播放。
@@ -87,8 +89,11 @@ build_exe.bat
 
 产物为 `dist\DLNA投屏器.exe`（约 12.7 MB）。**exe 本身不含 ffmpeg** —— 运行时按上面的顺序查找，找不到才下载。这样双击启动不必每次向磁盘写 231 MB，冷启动明显更快。
 
+- **出英文版**：`build_exe.bat --lang en` → 产物 `dist\DLNACast.exe`，界面默认英文
 - 用自定义 ffmpeg 打包：`build_exe.bat --ffmpeg D:\ffmpeg\ffmpeg.exe`
 - 想要「一个文件包揽全部」的旧方案（exe 约 69 MB）：`build_exe.bat --embed-ffmpeg`
+
+两个版本除语言外完全一致。英文版用户仍可用 `--lang zh` 或 `DLNACAST_LANG=zh` 在运行时切回中文。
 
 ### 方式二：直接跑源码
 
@@ -107,6 +112,8 @@ python screen-cast.py --low-latency                :: 流畅优先预设
 python screen-cast.py --no-push                    :: 只起流服务，本机自测
 python screen-cast.py --unmute                     :: 程序被强杀后本机没声音时用
 ```
+
+任意命令加 `--lang en` 即可改用英文输出。
 
 ---
 
@@ -204,6 +211,7 @@ python screen-cast.py --unmute                     :: 程序被强杀后本机�
 | `--audio` | `loopback` | `loopback` / `none` / `dshow:<设备名>` |
 | `--keep-local-audio` | 关 | 保留电脑本地声音（默认静音本机） |
 | `--low-latency` | 关 | 流畅优先预设：x264 + 250 ms 缓冲 + 400 ms 关键帧 + 30 fps |
+| `--lang` | `zh` | 界面语言：`zh` / `en` |
 | `--clock` | 关 | 打开毫秒时钟页，用于实测端到端延迟 |
 | `--no-osd` | 关 | 关闭画面右上角的信息显示 |
 | `--push-retry` | `2` | 电视未接入时的自动重推次数 |
@@ -295,9 +303,10 @@ python screen-cast.py --unmute                     :: 程序被强杀后本机�
 ```
 screen-cast.py          核心：设备发现 / 采集编码 / HTTP 流服务 / UPnP 推送（也是命令行入口）
 cast_gui.py             图形界面；同时是 PyInstaller 打包入口（无参数 → GUI，有参数 → 命令行）
+i18n.py                 中英翻译表（以中文原文为 key）
 ffmpeg_fetch.py         免配置获取 ffmpeg：查找 + GitHub 分段下载 + CRC 校验 + 能力检查
 ffpayload.py            「内嵌 ffmpeg」旧方案的追加式载荷（仅 --embed-ffmpeg 时使用）
-build_exe.py            一键打包（PyInstaller + 校验）
+build_exe.py            一键打包（PyInstaller + 校验）；--lang en 出英文版
 screen-cast.spec        PyInstaller 配置
 build_exe.bat           打包入口（纯 ASCII，避免 GBK 乱码）
 screen-cast.bat         命令行版启动器

@@ -53,6 +53,24 @@ import urllib.error
 import urllib.request
 import zlib
 
+# 双语支持。注意必须在**格式化之前**翻译：翻译表的 key 是带 %s/%d 的模板，
+# 一旦先把数字填进去就再也匹配不上了。所以本模块里所有 _l("...%s..." % x)
+# 都必须写成 _l(T("...%s...") % x)。
+# 本模块要能单独 import（tools/_fetch_*.py 会直接用），所以 i18n 缺失时给个退化桩。
+try:
+    import i18n
+except Exception:
+    class _I18nStub(object):
+        @staticmethod
+        def tr(s):
+            return s
+
+        @staticmethod
+        def current():
+            return "zh"
+    i18n = _I18nStub()
+T = i18n.tr
+
 GITHUB_API = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest"
 UA = "DlnaCast/1.0 (+https://github.com/GyanD/codexffmpeg)"
 ASSET_SUFFIX = "-essentials_build.zip"
@@ -101,11 +119,11 @@ def _range_bytes(url, start, end, timeout=120):
     with _urlopen(req, timeout=timeout) as r:
         status = getattr(r, "status", 200)
         if status != 206:
-            raise FetchError("服务器不支持按范围下载（HTTP %s）" % status)
+            raise FetchError(T("服务器不支持按范围下载（HTTP %s）") % status)
         data = r.read()
     want = end - start + 1
     if len(data) != want:
-        raise FetchError("范围下载长度不符：要 %d，得 %d" % (want, len(data)))
+        raise FetchError(T("范围下载长度不符：要 %d，得 %d") % (want, len(data)))
     return data
 
 
@@ -126,23 +144,23 @@ def resolve_source(log=None):
 
     override = os.environ.get("DLNACAST_FFMPEG_URL")
     if override:
-        _l("  使用环境变量 DLNACAST_FFMPEG_URL 指定的下载地址")
+        _l(T("  使用环境变量 DLNACAST_FFMPEG_URL 指定的下载地址"))
         return {"url": override, "name": os.path.basename(override),
                 "size": 0, "tag": "自定义"}
 
-    _l("  查询 GitHub 上的最新版本 ...")
+    _l(T("  查询 GitHub 上的最新版本 ..."))
     try:
         data = _http_json(GITHUB_API)
         tag = data.get("tag_name", "?")
         for a in data.get("assets", []):
             if a.get("name", "").endswith(ASSET_SUFFIX):
-                _l("  最新版本 %s，包 %s（%.1f MB）"
+                _l(T("  最新版本 %s，包 %s（%.1f MB）")
                    % (tag, a["name"], a.get("size", 0) / 1048576))
                 return {"url": a["browser_download_url"], "name": a["name"],
                         "size": a.get("size", 0), "tag": tag}
-        raise FetchError("最新版本 %s 里没有找到 %s" % (tag, ASSET_SUFFIX))
+        raise FetchError(T("最新版本 %s 里没有找到 %s") % (tag, ASSET_SUFFIX))
     except Exception as e:
-        _l("  GitHub API 失败（%s），改用固定地址兜底" % e)
+        _l(T("  GitHub API 失败（%s），改用固定地址兜底") % e)
 
     # 兜底：直接指向 gyan.dev 的稳定链接（会 303 到当前版本）
     return {"url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
@@ -206,7 +224,7 @@ def peek_member(url, member_suffix, total_size, log=None):
     cd = _range_bytes(url, cd_off, cd_off + cd_size - 1)
     m = _pick_member(cd, member_suffix)
     if not m:
-        raise FetchError("压缩包里没有 %s" % member_suffix)
+        raise FetchError(T("压缩包里没有 %s") % member_suffix)
     if log:
         log("  找到成员 %s（压缩 %0.1f MB / 解开 %0.1f MB）"
             % (m["name"], m["comp_size"] / 1048576, m["uncomp_size"] / 1048576))
@@ -245,12 +263,13 @@ def _download_span(url, start, end, path, on_bytes=None, timeout=600,
                         if on_bytes:
                             on_bytes(len(b))
             if done != want:
-                raise FetchError("分段长度不符：%d ≠ %d" % (done, want))
+                raise FetchError(T("分段长度不符：%d ≠ %d") % (done, want))
             return
         except Exception as e:
             last = e
             time.sleep(1.0 * (attempt + 1))
-    raise FetchError("分段下载失败（%d 次重试后）：%s" % (retries, last))
+    raise FetchError(T("分段下载失败（%d 次重试后）：%s")
+                        % (retries, T(last)))
 
 
 def _split_spans(data_start, comp_size, workers):
@@ -296,7 +315,7 @@ def fetch_member(url, member_suffix, total_size, dest, progress=None, log=None,
     data_start = m["local_off"] + 30 + name_len + extra_len
 
     spans = _split_spans(data_start, m["comp_size"], workers)
-    _l("  开始下载（%d 个连接并行，共约 %.1f MB）..."
+    _l(T("  开始下载（%d 个连接并行，共约 %.1f MB）...")
        % (len(spans), m["comp_size"] / 1048576))
 
     # 分段文件带上 crc，避免下载源换了新版本后误用旧版本的半截文件
@@ -342,7 +361,8 @@ def fetch_member(url, member_suffix, total_size, dest, progress=None, log=None,
         # 分段文件保留着 —— 下次重跑能接着下（断点续传）
         if cancelled:
             raise FetchError("已取消")
-        raise FetchError("有 %d 段没下完：%s" % (len(errs), list(errs.values())[0]))
+        raise FetchError(T("有 %d 段没下完：%s")
+                         % (len(errs), list(errs.values())[0]))
 
     # 顺序解压 + CRC（deflate 是连续流，必须按顺序）
     tmp = dest + ".part"
@@ -367,7 +387,8 @@ def fetch_member(url, member_suffix, total_size, dest, progress=None, log=None,
                 crc = zlib.crc32(tail, crc)
         fsize = os.path.getsize(tmp)
         if fsize != m["uncomp_size"]:
-            raise FetchError("解出大小不符：%d ≠ %d" % (fsize, m["uncomp_size"]))
+            raise FetchError(T("解出大小不符：%d ≠ %d")
+                             % (fsize, m["uncomp_size"]))
         if m["crc"] and (crc & 0xFFFFFFFF) != m["crc"]:
             raise FetchError("CRC 校验失败，下载可能被截断或篡改")
         _commit(tmp, dest)
@@ -387,7 +408,7 @@ def fetch_member(url, member_suffix, total_size, dest, progress=None, log=None,
                 pass
 
     el = max(0.001, time.time() - t0)
-    _l("  下载完成 %.1f MB，用时 %.0f 秒（平均 %.2f MB/s）"
+    _l(T("  下载完成 %.1f MB，用时 %.0f 秒（平均 %.2f MB/s）")
        % (state["got"] / 1048576, el, state["got"] / 1048576 / el))
     return dest
 
@@ -402,7 +423,7 @@ def download_full_and_extract(url, member_suffix, dest, progress=None, log=None,
             log(m)
 
     tmp_zip = dest + ".zip"
-    _l("  整包下载（不支持的服务器走这条路）...")
+    _l(T("  整包下载（不支持的服务器走这条路）..."))
     t0 = time.time()
     with _urlopen(_request(url), timeout=600) as r, open(tmp_zip, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
@@ -428,8 +449,9 @@ def download_full_and_extract(url, member_suffix, dest, progress=None, log=None,
                     member = n
                     break
             if not member:
-                raise FetchError("压缩包里没有 %s" % member_suffix)
-            _l("  解出 %s" % member)
+                raise FetchError(T("压缩包里没有 %s") % member_suffix)
+
+            _l(T("  解出 %s") % member)
             with z.open(member) as src, open(dest + ".part", "wb") as out:
                 shutil.copyfileobj(src, out, CHUNK)
         _commit(dest + ".part", dest)
@@ -438,7 +460,7 @@ def download_full_and_extract(url, member_suffix, dest, progress=None, log=None,
             os.remove(tmp_zip)
         except Exception:
             pass
-    _l("  完成，用时 %.0f 秒" % (time.time() - t0))
+    _l(T("  完成，用时 %.0f 秒") % (time.time() - t0))
     return dest
 
 
@@ -560,7 +582,7 @@ def download_ffmpeg(dest_dir, log=None, progress=None, cancel=None,
     except FetchError as e:
         if "已取消" in str(e):
             raise
-        _l("  按范围下载失败（%s），改为整包下载" % e)
+        _l(T("  按范围下载失败（%s），改为整包下载") % e)
         if progress:
             progress(0, 0, 0)
         download_full_and_extract(src["url"], MEMBER_SUFFIX, dest,
@@ -569,13 +591,16 @@ def download_ffmpeg(dest_dir, log=None, progress=None, cancel=None,
     ver = probe_version(dest)
     if not ver:
         raise FetchError("下载的 ffmpeg 无法执行（可能被杀软隔离）")
+    # 这行只是「两个空格 + 版本号」，版本号是纯 ASCII，没有需要翻的东西
     _l("  %s" % ver)
 
     ok, missing = required_features_ok(dest)
     if not ok:
-        _l("  ! 这份 ffmpeg 缺少：%s" % "、".join(missing))
+        # 顿号是中文标点，英文界面该用逗号 —— 分隔符本身也是文案
+        sep = ", " if i18n.current() == "en" else "、"
+        _l(T("  ! 这份 ffmpeg 缺少：%s") % sep.join(missing))
     else:
-        _l("  能力检查通过：libx264 / h264_mf / gdigrab / drawtext / mpegts 都在")
+        _l(T("  能力检查通过：libx264 / h264_mf / gdigrab / drawtext / mpegts 都在"))
     return dest
 
 
@@ -606,15 +631,15 @@ def ensure_ffmpeg(dest_dir, locate=None, log=None, progress=None,
             if ver:
                 return found, ("本机已有：" + ver.split(" Copyright")[0])
             # 找得到但跑不起来（被杀软隔离 / 依赖缺失）—— 当成没有
-            _l("找到 %s，但它无法执行，忽略。" % found)
+            _l(T("找到 %s，但它无法执行，忽略。") % found)
     elif force:
-        _l("已设 DLNACAST_FORCE_DOWNLOAD，跳过本机已有的 ffmpeg。")
+        _l(T("已设 DLNACAST_FORCE_DOWNLOAD，跳过本机已有的 ffmpeg。"))
 
     if not allow_download:
         return None, "本机没有 ffmpeg，且已禁用自动下载"
 
-    _l("本机没有找到 ffmpeg，准备从 GitHub 下载最新版 ...")
-    _l("  （想用别的镜像：设环境变量 DLNACAST_FFMPEG_URL 指向另一个 zip）")
+    _l(T("本机没有找到 ffmpeg，准备从 GitHub 下载最新版 ..."))
+    _l(T("  （想用别的镜像：设环境变量 DLNACAST_FFMPEG_URL 指向另一个 zip）"))
     try:
         path = download_ffmpeg(dest_dir, log=log, progress=progress,
                                cancel=cancel)

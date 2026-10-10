@@ -21,12 +21,20 @@ import sys
 import time
 
 TITLE = "DLNA 屏幕投屏器"
+# 中英文两版 exe 的窗口标题不同，两个都认；也可用环境变量指定。
+TITLES = (TITLE, "DLNA Screen Caster")
+if os.environ.get("DLNACAST_WINDOW_TITLE"):
+    TITLES = (os.environ["DLNACAST_WINDOW_TITLE"],)
 TEMP = os.environ.get("TEMP") or os.environ.get("TMP") or "."
 STALE_DIR = os.path.join(TEMP, "_dlna_stale_park")
 
 
 def hwnd_of_title():
-    return ctypes.windll.user32.FindWindowW(None, TITLE)
+    for t in TITLES:
+        h = ctypes.windll.user32.FindWindowW(None, t)
+        if h:
+            return h
+    return 0
 
 
 def park_stale_mei():
@@ -89,7 +97,8 @@ def main():
             print("找不到：%s" % path)
             return 1
 
-    names = [os.path.basename(a), os.path.basename(b), "DLNA投屏器.exe"]
+    names = [os.path.basename(a), os.path.basename(b), "DLNA投屏器.exe",
+             "DLNACast.exe"]
 
     print("A = %s  (%.2f MB)" % (os.path.basename(a),
                                  os.path.getsize(a) / 1048576))
@@ -121,11 +130,12 @@ def main():
                      ("%.2f" % t_win) if t_win else "**超时**",
                      t_alive, moved))
     print()
-    for tag, label in (("A", "新版 12.7 MB（不内嵌）"),
-                       ("B", "旧版 69.2 MB（内嵌 ffmpeg）")):
+    for tag, exe in (("A", a), ("B", b)):
         wins = sorted(w for w in res[tag] if w)
+        label = "%s（%.1f MB）" % (os.path.basename(exe),
+                                  os.path.getsize(exe) / 1048576)
         if not wins:
-            print("%s（%s）：全部超时" % (tag, label))
+            print("%s %s：全部超时" % (tag, label))
             continue
         print("%s %s：窗口出现 中位 %.2f 秒 | 最小 %.2f | 最大 %.2f （%d 次有效）"
               % (tag, label, wins[len(wins) // 2], wins[0], wins[-1], len(wins)))

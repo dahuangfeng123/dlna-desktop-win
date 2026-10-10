@@ -12,7 +12,8 @@ rem  Chinese Windows and any UTF-8 Chinese text here would turn into
 rem  garbage.
 rem
 rem  Usage:
-rem    build_exe.bat
+rem    build_exe.bat                       (Chinese UI -> dist\<chinese-name>.exe)
+rem    build_exe.bat --lang en             (English UI -> dist\DLNACast.exe)
 rem    build_exe.bat --keep-build
 rem    build_exe.bat --embed-ffmpeg --ffmpeg D:\ffmpeg\ffmpeg.exe
 rem ---------------------------------------------------------------

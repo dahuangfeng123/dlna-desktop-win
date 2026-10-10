@@ -18,7 +18,9 @@
 import os
 
 HERE = SPECPATH          # PyInstaller 注入：spec 文件所在目录
-APP_NAME = "DLNA投屏器"
+# 产物名由 build_exe.py 用环境变量传进来（中文版叫「DLNA投屏器.exe」，
+# 英文版叫 DLNACast.exe）。不带这个变量直接跑 PyInstaller 时退回中文名。
+APP_NAME = os.environ.get("DLNACAST_APP_NAME") or "DLNA投屏器"
 
 # ------------------------------------------------------------------ 数据文件
 # screen-cast.py 是**数据文件**而不是模块：文件名带连字符没法 import，
@@ -40,6 +42,12 @@ hiddenimports = [
     "xml.etree.ElementTree", "xml.sax.saxutils",
     "tkinter", "tkinter.ttk", "tkinter.messagebox", "tkinter.scrolledtext",
     "ffmpeg_fetch",
+    # 界面文案双语。screen-cast.py 是数据文件，它的 import 静态分析看不到，
+    # 所以要在这里显式列上。
+    "i18n",
+    # 构建期生成的语言常量（build_exe.py 写入，构建完即清理）。
+    # 英文版 exe 就是靠它把默认语言定死成 en。
+    "_lang_build",
 ]
 
 # 明显用不到又特别占体积的，排除掉

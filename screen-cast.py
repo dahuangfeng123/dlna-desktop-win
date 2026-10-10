@@ -146,6 +146,39 @@ import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import escape
 
+# 界面文案国际化。套 try 是为了极端情况（有人把这个文件单独拷出去当脚本跑）
+# 也能退化运行：没有 i18n 模块就当纯中文，功能一点不少。
+try:
+    import i18n
+except Exception:                                   # pragma: no cover
+    class _I18nStub(object):
+        LANG = "zh"
+
+        @staticmethod
+        def tr(s):
+            return s
+
+        @staticmethod
+        def localize_html(s):
+            return s
+
+        @staticmethod
+        def set_lang(code):
+            return code
+
+        @staticmethod
+        def resolve(argv=None):
+            return "zh"
+
+        @staticmethod
+        def is_en():
+            return False
+
+    i18n = _I18nStub()
+
+# 短名。build_parser() 的 help 文案里出现几十次，写全名太吵。
+T = i18n.tr
+
 # ---------------------------------------------------------------- 常量
 
 SSDP_MCAST_ADDR = "239.255.255.250"
@@ -275,8 +308,14 @@ def _emit_log(text, is_err):
 
 
 def log(msg, *args):
+    # 翻译必须发生在 % 格式化**之前** —— 翻译表的 key 是带 %s/%d 的模板，
+    # 格式化之后数字已经填进去，就再也匹配不上了。
+    msg = i18n.tr(msg)
     if args:
-        msg = msg % args
+        # 参数里同样可能带文案（画质档位标签、退出码含义、设备状态…），
+        # 一并翻掉；非字符串（数字、异常对象）原样传下去。
+        msg = msg % tuple(i18n.tr(a) if isinstance(a, str) else a
+                          for a in args)
     # ★ --windowed 打包后 sys.stdout 为 None，直接 print 会抛 AttributeError
     try:
         if sys.stdout is not None:
@@ -287,8 +326,10 @@ def log(msg, *args):
 
 
 def err(msg, *args):
+    msg = i18n.tr(msg)
     if args:
-        msg = msg % args
+        msg = msg % tuple(i18n.tr(a) if isinstance(a, str) else a
+                          for a in args)
     try:
         if sys.stderr is not None:
             print(msg, file=sys.stderr, flush=True)
@@ -2565,7 +2606,7 @@ class CastHTTPHandler(BaseHTTPRequestHandler):
                 return
             self._serve_live_ts()
         elif path in ("/clock", "/clock.html"):
-            body = CLOCK_PAGE.encode("utf-8")
+            body = i18n.localize_html(CLOCK_PAGE).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -3045,14 +3086,14 @@ def choose_device(devices):
         log("发现 1 台设备：%s", devices[0].name)
         return devices[0]
     log("")
-    log("发现 %d 台可投屏设备：" % len(devices))
+    log("发现 %d 台可投屏设备：", len(devices))
     for i, d in enumerate(devices, 1):
         log("  [%d] %s  (%s)", i, d.name, d.ip)
     log("  [R] 重新扫描")
     log("  [0] 退出")
     while True:
         try:
-            k = input("请选择: ").strip().upper()
+            k = input(T("请选择: ")).strip().upper()
         except (EOFError, KeyboardInterrupt):
             return None
         if k == "0":
@@ -3075,13 +3116,13 @@ def choose_quality(src_size=None):
         note = ""
         tgt_h = QUALITY_PRESETS[k][0]
         if src_h and tgt_h > src_h:
-            note = "  ← 本机屏幕为 %dp，选它会自动降级为 %dp" % (src_h, src_h)
+            note = T("  ← 本机屏幕为 %dp，选它会自动降级为 %dp") % (src_h, src_h)
         log("  [%d] %s%s", i, QUALITY_LABELS[k], note)
     if src_h:
         log("      （本机屏幕 %dp：1080hq 才是真正提高画质的那一档）", src_h)
     while True:
         try:
-            k = input("请选择 [1]: ").strip() or "1"
+            k = input(T("请选择 [1]: ")).strip() or "1"
         except (EOFError, KeyboardInterrupt):
             return "720"
         if k.isdigit() and 1 <= int(k) <= len(keys):
@@ -3437,10 +3478,10 @@ class CastConfig(object):
 
 def build_parser(argv=None):
     ap = argparse.ArgumentParser(
-        description="DLNA 屏幕投屏器（把本机屏幕投到智能电视）",
+        description=T("DLNA 屏幕投屏器（把本机屏幕投到智能电视）"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "想进一步降低延迟 ——\n"
+            T("想进一步降低延迟 ——\n"
             "  端到端延迟的主体是电视自带播放器的缓冲深度，本机侧调不动它。\n"
             "  绕开的办法：用【电视自己的浏览器】打开下面这个地址（属于同一个\n"
             "  局域网，启动时程序会打印出完整地址）：\n"
@@ -3458,83 +3499,85 @@ def build_parser(argv=None):
             "实测延迟 ——\n"
             "  加 --clock 会打开毫秒时钟页，手机拍一张电脑与电视的同框照，\n"
             "  两个时间戳相减即端到端延迟。隔 30 秒再拍一张，数值变大说明\n"
-            "  电视端缓冲在持续堆积。\n"
+            "  电视端缓冲在持续堆积。\n")
         ))
-    ap.add_argument("-l", "--list", action="store_true", help="仅列出设备")
-    ap.add_argument("-n", "--number", type=int, help="直接选择第 N 个设备")
-    ap.add_argument("--ip", help="直接指定电视 IP（跳过扫描）")
+    ap.add_argument("-l", "--list", action="store_true", help=T("仅列出设备"))
+    ap.add_argument("-n", "--number", type=int, help=T("直接选择第 N 个设备"))
+    ap.add_argument("--ip", help=T("直接指定电视 IP（跳过扫描）"))
     ap.add_argument("--mode", choices=["mpegts", "hls"], default="mpegts",
-                    help="推流模式，默认 mpegts")
+                    help=T("推流模式，默认 mpegts"))
     ap.add_argument("--quality", choices=list(QUALITY_PRESETS.keys()),
                     default="720",
-                    help="画质档位：540/720/1080/1080hq/1440(2K)/2160(4K)")
+                    help=T("画质档位：540/720/1080/1080hq/1440(2K)/2160(4K)"))
     ap.add_argument("--fps", type=int, default=30,
-                    help="帧率，默认 30。实测 gdigrab 1080p 可稳定跑满 30 —— "
+                    help=T("帧率，默认 30。实测 gdigrab 1080p 可稳定跑满 30 —— "
                          "25 fps 白丢 17%% 的帧，且 25 与电视 60Hz 不整除"
                          "（60÷25=2.4）会产生节奏不均的 judder；30 整除最顺畅。"
-                         "想更高需配合 --capture ddagrab")
+                         "想更高需配合 --capture ddagrab"))
     ap.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
     ap.add_argument("--scan-timeout", type=float, default=4.0)
     ap.add_argument("--encoder", choices=["auto", "x264", "mf"], default="auto",
-                    help="视频编码器：auto（默认，优先硬件编码，失败自动回退）"
+                    help=T("视频编码器：auto（默认，优先硬件编码，失败自动回退）"
                          " / mf（MediaFoundation 硬件编码，CPU 几乎不占，"
                          "适合 2K/4K 与低延迟） / x264（软编，帧率最稳、"
-                         "输出 Main profile 画质更实）")
+                         "输出 Main profile 画质更实）"))
     ap.add_argument("--capture", choices=["auto", "gdigrab", "ddagrab"],
                     default="auto",
-                    help="屏幕采集后端。auto（默认，ddagrab 可用则优先，"
+                    help=T("屏幕采集后端。auto（默认，ddagrab 可用则优先，"
                          "不可用自动退回 gdigrab） / gdigrab（GDI 抓屏，"
                          "兼容性最好，1080p 实测上限 30 fps） / ddagrab"
                          "（Desktop Duplication，GPU 抓帧，CPU 占用低、"
-                         "帧率上限更高，需可用的 D3D11 桌面会话）")
+                         "帧率上限更高，需可用的 D3D11 桌面会话）"))
     ap.add_argument("--latency-ms", type=int, default=300,
-                    help="★ 本机流缓冲水位（毫秒）。这是本机侧延迟的唯一来源，"
-                         "越小延迟越低，弱网下更易卡顿。默认 300")
+                    help=T("★ 本机流缓冲水位（毫秒）。这是本机侧延迟的唯一来源，"
+                         "越小延迟越低，弱网下更易卡顿。默认 300"))
     ap.add_argument("--bitrate", type=int, default=0, metavar="KBPS",
-                    help="手动指定视频目标码率（kbps），覆盖画质档位的默认值，"
+                    help=T("手动指定视频目标码率（kbps），覆盖画质档位的默认值，"
                          "峰值自动取 1.18 倍。0 = 用档位默认。"
                          "当电视端持续卡顿、日志出现\"链路吞吐不足\"时，"
-                         "用一个比实测交付速率低 15%% 左右的值即可")
+                         "用一个比实测交付速率低 15%% 左右的值即可"))
     ap.add_argument("--gop-ms", type=int, default=500,
-                    help="关键帧间隔（毫秒）。越小，追帧丢弃后画面恢复越快，"
-                         "代价是码率上升。默认 500")
+                    help=T("关键帧间隔（毫秒）。越小，追帧丢弃后画面恢复越快，"
+                         "代价是码率上升。默认 500"))
     ap.add_argument("--low-latency", action="store_true",
-                    help="一键流畅优先预设：x264 软编 + 250ms 缓冲 + "
-                         "400ms 关键帧 + 30fps（帧率最稳、judder 最小）")
+                    help=T("一键流畅优先预设：x264 软编 + 250ms 缓冲 + "
+                         "400ms 关键帧 + 30fps（帧率最稳、judder 最小）"))
     ap.add_argument("--allow-upscale", action="store_true",
-                    help="允许把画面放大到档位分辨率。默认禁止：1080p 屏幕选 4K 档"
-                         "会自动降级到 1080p，因为放大不会变清晰，只增开销")
+                    help=T("允许把画面放大到档位分辨率。默认禁止：1080p 屏幕选 4K 档"
+                         "会自动降级到 1080p，因为放大不会变清晰，只增开销"))
     ap.add_argument("--push-retry", type=int, default=2,
-                    help="电视未接入、或接入后只缓冲不消化时的自动重推次数"
-                         "（重推会强制电视丢弃旧缓冲重新拉流），默认 2，0 关闭")
+                    help=T("电视未接入、或接入后只缓冲不消化时的自动重推次数"
+                         "（重推会强制电视丢弃旧缓冲重新拉流），默认 2，0 关闭"))
     ap.add_argument("--push-wait", type=float, default=18.0,
-                    help="每次推送后等待电视接入并正常消费的秒数，默认 18（覆盖常见 15 秒广告）")
+                    help=T("每次推送后等待电视接入并正常消费的秒数，默认 18（覆盖常见 15 秒广告）"))
     ap.add_argument("--clock", action="store_true",
-                    help="额外打开毫秒时钟页，用于实测端到端延迟"
-                         "（电脑与电视同框拍照，读时间差）")
+                    help=T("额外打开毫秒时钟页，用于实测端到端延迟"
+                         "（电脑与电视同框拍照，读时间差）"))
     ap.add_argument("--no-osd", action="store_true",
-                    help="关闭画面右上角的信息显示。默认开启："
-                         "帧率 / 码率 / 端到端延迟(ms)，灰白小字带阴影")
+                    help=T("关闭画面右上角的信息显示。默认开启："
+                         "帧率 / 码率 / 端到端延迟(ms)，灰白小字带阴影"))
     ap.add_argument("--osd-size", type=int, default=0,
-                    help="OSD 字号（像素）。默认按输出分辨率自动取约 1.8%% 高度")
+                    help=T("OSD 字号（像素）。默认按输出分辨率自动取约 1.8%% 高度"))
     ap.add_argument("--lead-ms", type=int, default=PACE_LEAD_MS,
-                    help="★ 发送节流：允许服务端超前实时多少毫秒。它直接决定"
+                    help=T("★ 发送节流：允许服务端超前实时多少毫秒。它直接决定"
                          "电视端缓冲深度，也就是延迟。默认 800 —— 既够电视起播，"
-                         "又不会像原来那样随播放时长无限累积。填 0 关闭节流")
+                         "又不会像原来那样随播放时长无限累积。填 0 关闭节流"))
     ap.add_argument("--audio", default="loopback",
-                    help="音频来源：loopback（默认，WASAPI 环回捕获系统声音）"
-                         " / none / dshow:<设备名>")
+                    help=T("音频来源：loopback（默认，WASAPI 环回捕获系统声音）"
+                         " / none / dshow:<设备名>"))
     ap.add_argument("--audio-offset", type=float, default=0.0,
-                    help="音频相对视频的偏移（秒），音画不同步时微调，默认 0")
+                    help=T("音频相对视频的偏移（秒），音画不同步时微调，默认 0"))
     ap.add_argument("--keep-local-audio", action="store_true",
-                    help="投屏时保留电脑本地声音；默认会把电脑静音，"
-                         "让声音只从电视出（避免两边同时响）")
+                    help=T("投屏时保留电脑本地声音；默认会把电脑静音，"
+                         "让声音只从电视出（避免两边同时响）"))
     ap.add_argument("--unmute", action="store_true",
-                    help="只解除本机静音后退出（程序被强制结束后电脑没声时用）")
+                    help=T("只解除本机静音后退出（程序被强制结束后电脑没声时用）"))
     ap.add_argument("--buffer", type=int, default=384,
-                    help="流缓冲上限（KB），越小延迟越低但越易卡顿，默认 384")
+                    help=T("流缓冲上限（KB），越小延迟越低但越易卡顿，默认 384"))
     ap.add_argument("--no-push", action="store_true",
-                    help="只启动流服务，不推给电视（本机自测）")
+                    help=T("只启动流服务，不推给电视（本机自测）"))
+    ap.add_argument("--lang", choices=["zh", "en"], default=None,
+                    help=T("界面语言：zh = 中文 / en = English"))
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap.parse_args(argv)
 
@@ -4006,10 +4049,10 @@ def scan_devices(timeout=4.0, log_fn=None):
     """
     local_ip = get_local_ip()
     if log_fn:
-        log_fn("本机 IP %s，开始扫描（约 %.0f 秒）..." % (local_ip, timeout))
+        log_fn(T("本机 IP %s，开始扫描（约 %.0f 秒）...") % (local_ip, timeout))
     devices = discover_devices(local_ip, timeout)
     if log_fn:
-        log_fn("发现 %d 个可投屏设备" % len(devices))
+        log_fn(T("发现 %d 个可投屏设备") % len(devices))
     return devices
 
 
@@ -4038,6 +4081,8 @@ def main(argv=None):
     注意 build_parser() 返回的已经是 Namespace（它内部就 parse 过了），
     这里不要再对它调 parse_args —— 否则 CLI 直接 AttributeError。
     """
+    # 语言必须在建 parser 之前定下来：help 文案是构造时求值的。
+    i18n.set_lang(i18n.resolve(argv))
     return run_cast(cfg_from_args(build_parser(argv)))
 
 
