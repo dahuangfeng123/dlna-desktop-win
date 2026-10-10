@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>电视端 · 低延迟播放</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#fff;
+    font-family:system-ui,"Microsoft YaHei",sans-serif}
+  #v{position:absolute;inset:0;width:100%;height:100%;background:#000;
+    object-fit:contain;outline:none}
+  #hud{position:absolute;left:0;right:0;bottom:0;padding:14px 24px;
+    background:rgba(0,0,0,.62);display:flex;flex-wrap:wrap;gap:8px 26px;
+    align-items:center;font-size:17px;line-height:1.6;transition:opacity .22s}
+  #hud.hide{opacity:0;pointer-events:none}
+  #hud i{font-style:normal;opacity:.58;margin-right:7px}
+  #hud b{color:#4ade80;font-weight:600;font-variant-numeric:tabular-nums}
+  #hud b.warn{color:#fbbf24}
+  #hud b.bad{color:#f87171}
+  #tiers{display:flex;gap:10px;margin-left:auto}
+  #tiers button{font:inherit;font-size:16px;padding:8px 16px;border-radius:9px;
+    border:1px solid #4b5563;background:#111827;color:#d1d5db;cursor:pointer}
+  #tiers button:focus{outline:3px solid #22c55e;outline-offset:2px}
+  #tiers button.on{background:#166534;border-color:#22c55e;color:#fff}
+  #mask{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:26px;text-align:center;
+    padding:7vw;background:rgba(0,0,0,.88)}
+  #mask.gone{display:none}
+  #mask h1{font-size:27px;font-weight:600;margin:0}
+  #mask p{font-size:19px;opacity:.78;margin:0;line-height:1.75;max-width:76ch}
+  #play{font:inherit;font-size:22px;padding:16px 46px;border-radius:12px;
+    border:2px solid #22c55e;background:#166534;color:#fff;cursor:pointer}
+  #play:focus{outline:3px solid #22c55e;outline-offset:3px}
+  #diagbtn{font:inherit;font-size:15px;padding:9px 24px;border-radius:10px;
+    border:1px solid #4b5563;background:#111827;color:#9ca3af;cursor:pointer}
+  #diagbtn:focus{outline:3px solid #22c55e;outline-offset:2px}
+  /* 诊断输出左对齐等宽，方便照着念 / 拍照 */
+  #msg.diag{text-align:left;max-width:92vw;max-height:56vh;overflow:auto;
+    font-size:15px;line-height:1.55;opacity:.92;
+    font-family:ui-monospace,Consolas,"Courier New",monospace;
+    word-break:break-word}
+  #note{position:absolute;right:22px;bottom:70px;font-size:14px;opacity:.42;
+    text-align:right;line-height:1.65;pointer-events:none}
+</style>
+</head>
+<body>
+<video id="v" playsinline></video>
+
+<div id="hud" class="hide">
+  <span><i>画面延迟</i><b id="lat">--</b></span>
+  <span><i>缓冲</i><b id="buf">--</b></span>
+  <span><i>分辨率</i><b id="res">--</b></span>
+  <span><i>帧率</i><b id="fps">--</b></span>
+  <span><i>丢帧</i><b id="drop">0</b></span>
+  <span><i>码率</i><b id="kbps">--</b></span>
+  <div id="tiers">
+    <button data-lat="0.5">极低延迟</button>
+    <button data-lat="1.0">低延迟</button>
+    <button data-lat="2.0">稳定优先</button>
+  </div>
+</div>
+
+<div id="note">按空格或 OK 键 显示 / 隐藏信息栏</div>
+
+<div id="mask">
+  <h1>准备就绪</h1>
+  <p id="msg">按遥控器的 OK 键开始播放</p>
+  <button id="play">开始播放</button>
+  <button id="diagbtn">网络自检</button>
+</div>
+
+<script>
+// ---------------------------------------------------------------- 取流通道
+// mpegts.js 有两条取流通道，它自己挑的顺序是「先 fetch 后 XHR」：
+//
+//   fetch 通道要求 Response 上带流式 body（response.body.getReader()）。
+//   而 mpegts.js 判断「能不能用 fetch 通道」时只看全局 ReadableStream 在不在
+//   （见 mpegts.js 里 FetchStreamLoader.isSupported），并不检查 fetch() 实际
+//   返回的 Response 有没有 body。于是某些电视浏览器满足它的判断、
+//   却拿不到 response.body —— 那句 getReader() 直接抛 TypeError，
+//   被 loader 的 catch 兜住，用户在屏幕上看到的就是：
+//       「播放出错：NetworkError · Exception」
+//
+// 我们要做的不是猜，而是把两条通道都试一遍：fetch 通不通不通就自动换 XHR。
+// XHR 通道走 onprogress 增量读，对 HTTP/1.0 长连接反而更宽容。
+//
+// 手动指定：?xhr=1 只用 XHR，?fetch=1 只用 fetch（都不自动换）
+//           ?ws=1  改走 WebSocket（/ws-live）
+// WebSocket 这条路的由来：这台电视没有 fetch，mpegts.js 就只剩
+// xhr-range-loader 可选，而它是「拉」模式、要等响应结束才处理数据，
+// 跟无限长的直播流从设计上就不兼容。WebSocket 是长连接、双向，
+// 不受 HTTP 版本 / chunked / Range / response.body 这些差异影响。
+(function(){
+  var q = location.search || '';
+  window.__chan = {
+    want: (q.indexOf('xhr=1') >= 0) ? 'xhr'
+        : (q.indexOf('fetch=1') >= 0) ? 'fetch' : 'fetch',
+    auto: (q.indexOf('xhr=1') < 0 && q.indexOf('fetch=1') < 0),
+    realFetch: (typeof fetch !== 'undefined') ? fetch : null,
+    wsMode: (q.indexOf('ws=1') >= 0),
+    downgraded: false,
+    log: []
+  };
+  // 强制某条通道的办法：把 window.fetch 藏起来，mpegts.js 的
+  // FetchStreamLoader.isSupported() 就会返回 false，自动退到 XHR。
+  window.__chan.apply = function(){
+    try {
+      if (this.want === 'xhr') { window.fetch = undefined; }
+      else if (this.realFetch) { window.fetch = this.realFetch; }
+    } catch (e) {}
+  };
+  window.__chan.apply();
+})();
+</script>
+<script src="/mpegts.js"></script>
+<script>
+(function(){
+  var v      = document.getElementById('v'),
+      hud    = document.getElementById('hud'),
+      mask   = document.getElementById('mask'),
+      msg    = document.getElementById('msg'),
+      note   = document.getElementById('note'),
+      btnGo  = document.getElementById('play'),
+      elLat  = document.getElementById('lat'),
+      elBuf  = document.getElementById('buf'),
+      elRes  = document.getElementById('res'),
+      elFps  = document.getElementById('fps'),
+      elDrop = document.getElementById('drop'),
+      elKbps = document.getElementById('kbps');
+
+  var player  = null,
+      tier    = 1.0,      // 目标最大缓冲延迟（秒）
+      running = false,
+      lastFrames = 0,
+      lastFramesAt = 0,
+      lastSpeedAt = 0;
+
+  function fail(text){
+    msg.innerHTML = text;
+    mask.classList.remove('gone');
+    hud.classList.add('hide');
+    running = false;
+  }
+
+  function esc(s){
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
+  }
+
+  // 把 loader 的第三参数摊开。这是唯一能看到真实原因的地方 ——
+  // 老浏览器抛的 TypeError 原文（比如 "body is null"）就在 info.msg 里，
+  // 而屏幕上原本只显示类型和详情两个标签，等于把线索丢了。
+  function infoDetail(info){
+    if (!info) return [];
+    var out = [];
+    try {
+      if (info.msg !== undefined && info.msg !== null && String(info.msg) !== '') {
+        out.push('内部原因：' + esc(info.msg));
+      }
+      if (info.code !== undefined) out.push('HTTP 状态：' + esc(info.code));
+      var rest = [];
+      for (var k in info) {
+        if (k === 'msg' || k === 'code') continue;
+        rest.push(k + '=' + String(info[k]));
+      }
+      if (rest.length) out.push(esc(rest.join('  ')));
+    } catch (e) {
+      out.push('(展开 info 失败：' + esc(e) + ')');
+    }
+    return out;
+  }
+
+  function envProbe(){
+    var o = [], f = {};
+    try { if (typeof mpegts !== 'undefined') f = mpegts.getFeatureList() || {}; }
+    catch (e) {}
+    o.push('UA: ' + navigator.userAgent);
+    o.push('fetch=' + (typeof fetch) +
+           '  ReadableStream=' + (typeof ReadableStream) +
+           '  AbortController=' + (typeof AbortController) +
+           '  Worker=' + (typeof Worker));
+    o.push('MediaSource=' + (typeof (window.MediaSource || window.WebKitMediaSource)) +
+           '  MSE可解码=' + f.msePlayback +
+           '  MSE实时=' + f.mseLivePlayback);
+    // mpegts.js 实际选中的取流通道。电视上常见的是 xhr-range-loader ——
+    // 它是「拉」模式，要等响应结束（readyState 4）才处理数据，
+    // 对一条永不结束的直播流并不合适，这条信息能直接解释报错来源。
+    o.push('mpegts 选中通道：' + (f.networkLoaderName || '(未知)') +
+           '   流式IO=' + f.networkStreamIO);
+    o.push('页面通道开关：' + (window.__chan.wsMode
+             ? 'WebSocket（/ws-live）'
+             : (window.__chan.want === 'xhr' ? 'XHR' : 'fetch')) +
+           (window.__chan.downgraded ? '（已从 fetch 自动降级）' : ''));
+    return o;
+  }
+
+  // 直接对 /live.ts 发一次请求，把「这个浏览器能不能流式读」摊到屏幕上。
+  // 判断 NetworkError 的根因，看这一个值就够：response.body 是不是 null。
+  function diag(done){
+    var lines = [];
+    var f = window.__chan.realFetch;
+    if (!f) {
+      lines.push('★ 这个浏览器没有 fetch，mpegts.js 只能走 XHR 通道');
+      done(lines);
+      return;
+    }
+    var t0 = Date.now();
+    f.call(window, '/live.ts?probe=1', { cache: 'no-store' })
+      .then(function(r){
+        lines.push('/live.ts → HTTP ' + r.status + '（' + (Date.now() - t0) + ' ms）');
+        lines.push('Content-Type: ' + (r.headers.get('Content-Type') || '(无)') +
+                   '   Content-Length: ' + (r.headers.get('Content-Length') || '(无)'));
+        lines.push('★ response.body = ' + (r.body
+            ? '正常（这个浏览器能流式读）'
+            : 'null ← 致命：fetch 通道必然报 NetworkError'));
+        if (r.body && r.body.getReader) {
+          var rd = r.body.getReader();
+          return rd.read().then(function(x){
+            lines.push(x.done
+              ? '★ 首块就读到流结束 —— 服务端没在推数据'
+              : '首块收到 ' + x.value.byteLength + ' 字节 —— 服务端在正常推流');
+            try { rd.cancel(); } catch (e) {}
+          });
+        }
+        try { if (r.body && r.body.cancel) r.body.cancel(); } catch (e) {}
+      })
+      .catch(function(e){
+        lines.push('★ 自检请求本身抛异常：' + esc(e));
+      })
+      .then(function(){ done(lines); });
+  }
+
+  function setTierUI(){
+    var bs = document.querySelectorAll('#tiers button');
+    for (var i=0;i<bs.length;i++){
+      var on = Math.abs(parseFloat(bs[i].getAttribute('data-lat')) - tier) < 0.01;
+      if (on) { bs[i].className = 'on'; } else { bs[i].className = ''; }
+    }
+  }
+
+  function clampNum(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
+
+  function start(){
+    if (typeof mpegts === 'undefined'){
+      fail('播放库没加载成功。<br>请确认这个页面的地址和播放地址来自同一台电脑。');
+      return;
+    }
+    var feat = mpegts.getFeatureList();
+    // ★ 判据必须是 msePlayback，不能是 mseLivePlayback。两者含义完全不同：
+    //     msePlayback     = MediaSource 认不认 avc1.42E01E,mp4a.40.2
+    //                       ← 这才是「能不能解码这条流」
+    //     mseLivePlayback = msePlayback && networkStreamIO
+    //                       而 networkStreamIO 只认 fetch-stream-loader 和
+    //                       xhr-moz-chunked-loader 两条通道。电视浏览器普遍
+    //                       没有 fetch，更没有 Firefox 专有的
+    //                       moz-chunked-arraybuffer，于是 networkStreamIO
+    //                       恒为 false —— 哪怕 MSE 完全可用，这个字段也是 false。
+    //     用 mseLivePlayback 判断会把「没有流式IO通道」误报成「不支持 MSE」，
+    //     把人白白引到 VLC 那条路上去。
+    if (!feat.msePlayback){
+      fail('这个电视浏览器不支持 MSE 实时播放，用不了这条路。<br>' +
+           '（判据：MediaSource 不接受 avc1.42E01E + mp4a.40.2 这组编码）<br><br>' +
+           '请改用 <b>VLC for Android</b>：<br>' +
+           '打开「网络串流」，填入电脑上显示的投流地址（以 /live.ts 结尾），<br>' +
+           '再到 VLC 设置里把「网络缓冲」调成 300 毫秒。');
+      msg.classList.add('diag');
+      diag(function(lines){
+        fail('这个电视浏览器不支持 MSE 实时播放，用不了这条路。<br>' +
+             '（判据：MediaSource 不接受 avc1.42E01E + mp4a.40.2 这组编码）<br><br>' +
+             '请改用 <b>VLC for Android</b>：<br>' +
+             '打开「网络串流」，填入电脑上显示的投流地址（以 /live.ts 结尾），<br>' +
+             '再到 VLC 设置里把「网络缓冲」调成 300 毫秒。<br><br>' +
+             envProbe().join('<br>') + '<br><br>' + lines.join('<br>'));
+      });
+      return;
+    }
+
+    if (player){ try { player.destroy(); } catch(e){} player = null; }
+
+    // 通道开关必须赶在 createPlayer 之前生效：mpegts.js 是在建播放器时
+    // 用 isSupported() 一次性把 loader 选定的，之后再改 window.fetch 没用
+    window.__chan.apply();
+
+    // 走 WebSocket 时把地址换成 ws:// —— mpegts.js 只要看到 ws:// 就会选
+    // websocket-loader，它只要求服务端把 TS 按二进制帧发过来即可。
+    var streamUrl = window.__chan.wsMode
+        ? ('ws://' + location.host + '/ws-live')
+        : '/live.ts';
+
+    player = mpegts.createPlayer(
+      { type: 'mpegts', isLive: true, url: streamUrl },
+      {
+        enableWorker: true,
+        enableStashBuffer: false,               // 关键：不留 stash 缓冲
+        stashInitialSize: 128,
+        liveBufferLatencyChasing: true,         // 关键：主动追赶直播边缘
+        liveBufferLatencyMaxLatency: Math.max(tier, 0.5),
+        liveBufferLatencyMinRemain: clampNum(tier * 0.4, 0.2, 0.8),
+        lazyLoad: false,
+        autoCleanupSourceBuffer: true
+      });
+
+    // ★ 先挂错误钩子再 load()：load() 之后 loader 的失败可能来得极快，
+    //   钩子晚一步就会漏掉最早那条（也就最有信息量的那条）
+    player.on(mpegts.Events.ERROR, onPlayerError);
+
+    player.attachMediaElement(v);
+    player.load();
+
+    var pr = v.play();
+    if (pr && pr.then){
+      pr.then(function(){
+        mask.classList.add('gone');
+        hud.classList.remove('hide');
+        note.style.opacity = 0;
+        running = true;
+        setTierUI();
+        // 用户刚按过键，属于有效手势，此时请求全屏浏览器会放行
+        try {
+          var root = document.documentElement;
+          var rq = root.requestFullscreen || root.webkitRequestFullscreen ||
+                   root.msRequestFullscreen;
+          if (rq) { rq.call(root); }
+        } catch (e) {}
+      }).catch(function(){
+        fail('浏览器不允许自动播放（必须先有一次点击才能出声）。<br>' +
+             '按遥控器 OK 键，或点下面的按钮。');
+      });
+    } else {
+      mask.classList.add('gone');
+      running = true;
+    }
+  }
+
+  // 播放器报错。分两条路走：
+  //   ① 走的是 fetch 通道、又是网络类错误 → 先自动换 XHR 通道重试一次。
+  //      电视端最常见的「fetch 拿不到流式 body」就是这一类，换通道即解决，
+  //      用户什么都不用做（地址后面加 ?fetch=1 可以关掉这个自动行为）。
+  //   ② 换过通道还失败 → 把现场信息全部摊出来：loader 的第三参数、
+  //      通道切换记录、浏览器能力、以及一次 /live.ts 自检的结果。
+  function onPlayerError(t, d, info){
+    var isNet = (t === 'NetworkError') ||
+                (typeof mpegts !== 'undefined' && mpegts.ErrorTypes &&
+                 t === mpegts.ErrorTypes.NETWORK_ERROR);
+
+    if (isNet && !window.__chan.wsMode && window.__chan.want === 'fetch'
+        && window.__chan.auto && !window.__chan.downgraded){
+      window.__chan.downgraded = true;
+      window.__chan.want = 'xhr';
+      window.__chan.log.push('fetch 通道报 NetworkError → 已自动切到 XHR 通道重试');
+      // 别在这个回调里 destroy 掉正在发事件的播放器，挪到下一个事件循环
+      setTimeout(function(){ mask.classList.add('gone'); start(); }, 0);
+      return;
+    }
+
+    var head = '播放出错：<b>' + esc(t) + '</b>' + (d ? ' · <b>' + esc(d) + '</b>' : '');
+    msg.classList.add('diag');
+    fail(head + '<br><br>正在自检 ...');
+
+    diag(function(lines){
+      var blocks = [];
+      var det = infoDetail(info);
+      if (det.length) blocks.push(det.join('<br>'));
+      if (window.__chan.log.length) blocks.push(window.__chan.log.join('<br>'));
+      blocks.push(envProbe().join('<br>'));
+      blocks.push(lines.join('<br>'));
+      fail(head + '<br><br>' + blocks.join('<br><br>') +
+           '<br><br>按遥控器 OK 键重试。');
+    });
+  }
+
+  function retry(){ mask.classList.add('gone'); start(); }
+
+  // ---------------- 信息栏刷新 ----------------
+  setInterval(function(){
+    if (!running || !player) return;
+
+    // 画面延迟 = 缓冲区末尾时间戳 - 当前播放位置
+    var b = v.buffered, lat = 0, buf = 0;
+    if (b && b.length){
+      var ed = b.end(b.length - 1), st = b.start(b.length - 1);
+      lat = ed - v.currentTime;
+      buf = ed - st;
+    }
+    elLat.textContent = (lat > 0 ? lat.toFixed(2) : '0.00') + ' s';
+    elLat.className = lat > 1.5 ? 'warn' : '';
+    elBuf.textContent = buf.toFixed(2) + ' s';
+
+    if (v.videoWidth){
+      elRes.textContent = v.videoWidth + '×' + v.videoHeight;
+    }
+
+    // 帧率：由解码帧数增量推算
+    var now = Date.now();
+    var si = player.statisticsInfo || {};
+    var dec = si.decodedFrames || 0;
+    if (lastFramesAt && dec >= lastFrames){
+      var inst = (dec - lastFrames) * 1000 / (now - lastFramesAt);
+      if (inst > 0 && inst < 200){
+        elFps.textContent = inst.toFixed(1);
+        elFps.className = inst < 20 ? 'warn' : '';
+      }
+    }
+    lastFrames = dec;
+    lastFramesAt = now;
+
+    // 丢帧：优先用浏览器的解码质量统计
+    var dropped = 0;
+    if (v.getVideoPlaybackQuality){
+      dropped = v.getVideoPlaybackQuality().droppedVideoFrames || 0;
+    } else {
+      dropped = si.droppedFrames || 0;
+    }
+    elDrop.textContent = dropped;
+    elDrop.className = dropped > 0 ? 'warn' : '';
+
+    // 码率
+    if (si.speed){
+      elKbps.textContent = (si.speed * 8 / 1000).toFixed(1) + ' Mbps';
+    }
+
+    // 画面真的在动吗（有些电视会假死不动）
+    if (v.paused && running){
+      elLat.className = 'bad';
+    }
+  }, 500);
+
+  // ---------------- 交互 ----------------
+  btnGo.addEventListener('click', retry);
+  // 手动自检：不进播放流程也能查出「这台电视到电脑的这条路通不通、
+  // 浏览器能不能流式读」，是排查时最该先按的一个键
+  var btnDiag = document.getElementById('diagbtn');
+  if (btnDiag){
+    btnDiag.addEventListener('click', function(e){
+      e.stopPropagation();
+      msg.classList.add('diag');
+      fail('正在自检 ...');
+      diag(function(lines){
+        var out = [];
+        if (window.__chan.log.length) out.push(window.__chan.log.join('<br>'));
+        out.push(envProbe().join('<br>'));
+        out.push(lines.join('<br>'));
+        fail(out.join('<br><br>') + '<br><br>按遥控器 OK 键开始播放。');
+      });
+    });
+  }
+  mask.addEventListener('click', function(e){
+    // 只处理点在空白处的情况：按钮自身的点击会冒泡上来，
+    // 若不拦住就会连续调用两次 retry，白白重建一次播放器
+    if (e.target === mask || e.target === msg) { retry(); }
+  });
+
+  document.addEventListener('keydown', function(e){
+    var k = e.key;
+    if (k === ' ' || k === 'Enter' || k === 'OK' || k === 'Select'){
+      if (!mask.classList.contains('gone')){   // 还在遮罩层 → 开始播放
+        retry();
+      } else {                                  // 已在播放 → 切换信息栏
+        hud.classList.toggle('hide');
+        note.style.opacity = 0;
+      }
+      e.preventDefault();
+    }
+  });
+
+  var tiers = document.querySelectorAll('#tiers button');
+  for (var i=0;i<tiers.length;i++){
+    (function(btn){
+      btn.addEventListener('click', function(e){
+        e.stopPropagation();
+        tier = parseFloat(btn.getAttribute('data-lat'));
+        setTierUI();
+        start();                                // 换档需要重建播放器
+      });
+      // 遥控器选中某项时，也让焦点可见
+      btn.addEventListener('focus', function(){ note.style.opacity = 0; });
+    })(tiers[i]);
+  }
+
+  setTierUI();
+})();
+</script>
+</body>
+</html>

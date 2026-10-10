@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>电视端能力探测</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:#0b0f14;color:#e5e7eb;
+    font-family:ui-monospace,Consolas,"Courier New",monospace}
+  #wrap{padding:16px 18px 90px;max-width:1180px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px;color:#fff;
+    font-family:system-ui,"Microsoft YaHei",sans-serif}
+  #sub{font-size:13px;opacity:.55;margin-bottom:14px;line-height:1.6;
+    font-family:system-ui,"Microsoft YaHei",sans-serif}
+  section{background:#111827;border:1px solid #1f2937;border-radius:10px;
+    padding:11px 13px;margin-bottom:11px}
+  h2{font-size:14px;margin:0 0 7px;color:#93c5fd;font-weight:600}
+  pre{margin:0;white-space:pre-wrap;word-break:break-word;font-size:14px;
+    line-height:1.62}
+  .ok{color:#4ade80}
+  .no{color:#f87171}
+  .warn{color:#fbbf24}
+  .dim{opacity:.5}
+  video{width:100%;max-width:600px;background:#000;border-radius:8px;
+    border:1px solid #1f2937;margin-top:9px;display:block}
+  #bar{position:fixed;left:0;right:0;bottom:0;padding:11px 16px;
+    background:rgba(11,15,20,.94);border-top:1px solid #1f2937;
+    display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  #stat{font-size:13px;opacity:.6;flex:1;
+    font-family:system-ui,"Microsoft YaHei",sans-serif}
+  button{font:inherit;font-size:14px;padding:9px 18px;border-radius:9px;
+    border:1px solid #4b5563;background:#111827;color:#d1d5db;cursor:pointer}
+  button:focus{outline:3px solid #22c55e;outline-offset:2px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>电视端能力探测</h1>
+  <div id="sub">
+    不用按键，打开就自动跑，共约 18 秒。跑完点右下角「复制全部结果」，
+    或直接拍照发回。
+  </div>
+
+  <section><h2>1 · 运行环境</h2><pre id="o1">…</pre></section>
+  <section><h2>2 · MSE 编解码支持（能否用 mpegts.js 的前提）</h2>
+    <pre id="o2">…</pre></section>
+  <section><h2>3 · mpegts.js 能力与通道选择</h2><pre id="o3">…</pre></section>
+  <section><h2>4 · XHR 流式读取（关键：决定 HTTP 方案死活）</h2>
+    <pre id="o4">…</pre></section>
+  <section><h2>5 · WebSocket（握手 + 推流实测）</h2>
+    <pre id="o5">…</pre></section>
+  <section><h2>6 · 原生播放器</h2><pre id="o6">…</pre>
+    <video id="nv" controls muted playsinline></video></section>
+</div>
+
+<div id="bar">
+  <span id="stat">准备中 …</span>
+  <button id="copy">复制全部结果</button>
+</div>
+
+<script src="/mpegts.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  var ALL = [];          // 复制用：每段的纯文本
+
+  function sec(n, lines, cls){
+    // 每行可带 {t:文字, c:'ok'|'no'|'warn'} 形式做高亮
+    var html = [], plain = [];
+    for (var i=0;i<lines.length;i++){
+      var L = lines[i];
+      if (L && typeof L === 'object') {
+        html.push('<span class="' + (L.c || '') + '">' + esc(L.t) + '</span>');
+        plain.push(L.t);
+      } else {
+        html.push(esc(L));
+        plain.push(String(L));
+      }
+    }
+    document.getElementById('o' + n).innerHTML = html.join('\n');
+    ALL[n] = plain.join('\n');
+    window.__probeDone = n;
+  }
+
+  function esc(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                    .replace(/>/g,'&gt;');
+  }
+  function T(x){                 // typeof 的简写
+    try { return typeof x; } catch(e){ return '(取值失败)'; }
+  }
+  function tag(cond){ return cond ? {t:'✓', c:'ok'} : {t:'✗', c:'no'}; }
+
+  // ---------------------------------------------------------- 1 环境
+  function step1(){
+    var L = [];
+    L.push('UA: ' + navigator.userAgent);
+    L.push('platform: ' + navigator.platform +
+           '   屏幕: ' + screen.width + '×' + screen.height +
+           '   像素比: ' + (window.devicePixelRatio || 1));
+    L.push('触屏: ' + ('ontouchstart' in window ? '有' : '无'));
+    L.push('');
+    L.push('fetch=' + T(window.fetch) +
+           '   XMLHttpRequest=' + T(window.XMLHttpRequest) +
+           '   WebSocket=' + T(window.WebSocket));
+    L.push('ReadableStream=' + T(window.ReadableStream) +
+           '   AbortController=' + T(window.AbortController) +
+           '   Worker=' + T(window.Worker));
+    L.push('MediaSource=' + T(window.MediaSource) +
+           '   WebKitMediaSource=' + T(window.WebKitMediaSource) +
+           '   ManagedMediaSource=' + T(window.ManagedMediaSource));
+    L.push('URL.createObjectURL=' + T(window.URL && window.URL.createObjectURL) +
+           '   Blob=' + T(window.Blob));
+    sec(1, L);
+  }
+
+  // ---------------------------------------------------------- 2 MSE
+  function step2(){
+    var L = [], MS = window.MediaSource || window.WebKitMediaSource;
+    if (!MS || typeof MS.isTypeSupported !== 'function'){
+      L.push({t:'★ 没有可用的 MediaSource.isTypeSupported —— ' +
+                'MSE 这条路直接判死，只能走 VLC / DLNA。', c:'no'});
+      sec(2, L);
+      return false;
+    }
+    L.push('本机流的编码是 H.264 Constrained Baseline + AAC(48kHz 立体声)。');
+    L.push('逐条测「这个浏览器认不认」：');
+    L.push('');
+
+    var M = [
+      ['video/mp4; codecs="avc1.42E01E,mp4a.40.2"', 'fMP4 + Baseline + AAC（mpegts.js 的判据）'],
+      ['video/mp4; codecs="avc1.42E01E"',            'fMP4 + Baseline，无音频'],
+      ['video/mp4; codecs="avc1.4D401E"',            'fMP4 + H.264 Main'],
+      ['video/mp4; codecs="avc1.64001F"',            'fMP4 + H.264 High'],
+      ['video/mp4; codecs="avc1.42E01E,mp4a.40.2"',  '（重复，看稳定性）'],
+      ['video/mp2t; codecs="avc1.42E01E"',           'TS 封装 + Baseline（我们的流就是这个）'],
+      ['video/mp2t; codecs="avc1.42E01E,mp4a.40.2"', 'TS 封装 + Baseline + AAC'],
+      ['video/mp4; codecs="hvc1.1.6.L93.B0"',        'fMP4 + H.265']
+    ];
+    var any = false;
+    for (var i=0;i<M.length;i++){
+      var ok = false;
+      try { ok = !!MS.isTypeSupported(M[i][0]); } catch(e){}
+      if (ok) any = true;
+      L.push([tag(ok), '  ' + M[i][1]]);
+      L.push('      ' + M[i][0] + '  →  ' + (ok ? '支持' : '不支持'));
+    }
+    L.push('');
+    if (any) {
+      L.push({t:'★ 至少有一条 H.264 组合被接受 —— MSE 有戏。', c:'ok'});
+    } else {
+      L.push({t:'★ 全部不支持 —— 这个浏览器拿不出能解码我们流的 MSE。', c:'no'});
+    }
+    sec(2, L);
+    return any;
+  }
+
+  // ---------------------------------------------------------- 3 mpegts
+  function step3(){
+    var L = [];
+    if (typeof mpegts === 'undefined'){
+      L.push({t:'★ mpegts.js 没加载成功（/mpegts.js 拿不到？）', c:'no'});
+      sec(3, L);
+      return;
+    }
+    L.push('mpegts.js 已加载。');
+    var f = {};
+    try { f = mpegts.getFeatureList() || {}; } catch(e){
+      L.push({t:'★ getFeatureList() 抛异常：' + e, c:'no'});
+      sec(3, L);
+      return;
+    }
+    L.push('');
+    var keys = Object.keys(f);
+    for (var i=0;i<keys.length;i++){
+      var k = keys[i], v = f[k];
+      var line = '  ' + k + ' = ' + v;
+      if (k === 'networkLoaderName'){
+        L.push({t: line + '   ★ 实际选中的取流通道', c:'warn'});
+      } else {
+        L.push(line);
+      }
+    }
+    L.push('');
+    L.push('说明：mpegts.js 的 mseLivePlayback = msePlayback && networkStreamIO。');
+    L.push('      networkStreamIO 只认 fetch-stream / xhr-moz-chunked 两种通道，');
+    L.push('      所以就算 msePlayback 为 true，mseLivePlayback 也可能是 false。');
+    L.push('      ★ 判断「能不能播」要看 msePlayback，不能看 mseLivePlayback。');
+    sec(3, L);
+  }
+
+  // ---------------------------------------------------------- 4 XHR 流式
+  // 这项是整份探测里最关键的：arraybuffer 类型的 XHR 在 readyState 3
+  // （数据正在流入、但响应还没结束）时，规范要求 xhr.response 返回 null。
+  // 如果这台电视真按规范来，那任何「用 XHR 流式读 HTTP 长连接」的方案
+  // 都不成立，只能转 WebSocket。
+  // 注意：故意不用 http.client 那种封装的读法，这里要的就是裸行为。
+  function xhrTest(url, label, ms, cb){
+    var L = ['→ ' + label, '   ' + url];
+    var xhr, t0 = Date.now();
+    var prog = 0, lastLoaded = 0, nonNull = 0, isNull = 0, maxLen = 0;
+    var rsSeen = [], err = '';
+    try {
+      xhr = new XMLHttpRequest();
+      xhr.open('GET', url + (url.indexOf('?') >= 0 ? '&' : '?') +
+               '_probe=' + Date.now(), true);
+      xhr.responseType = 'arraybuffer';
+    } catch(e){
+      L.push({t:'   ★ 连请求都建不起来：' + e, c:'no'});
+      cb(L);
+      return;
+    }
+    if (xhr.responseType !== 'arraybuffer'){
+      L.push({t:'   ★ responseType 设不成 arraybuffer（设完还是 "' +
+                xhr.responseType + '"）', c:'no'});
+    }
+    xhr.onreadystatechange = function(){
+      if (rsSeen.indexOf(xhr.readyState) < 0) rsSeen.push(xhr.readyState);
+    };
+    xhr.onprogress = function(ev){
+      prog++;
+      if (ev && ev.loaded > lastLoaded) lastLoaded = ev.loaded;
+      var r = null;
+      try { r = xhr.response; } catch(e){}
+      if (r && typeof r.byteLength === 'number'){
+        nonNull++;
+        if (r.byteLength > maxLen) maxLen = r.byteLength;
+      } else {
+        isNull++;
+      }
+    };
+    xhr.onerror = function(){ err = 'onerror'; };
+    xhr.ontimeout = function(){ err = 'ontimeout'; };
+
+    setTimeout(function(){
+      try { xhr.abort(); } catch(e){}
+      L.push('   readyState 走过的值: ' +
+             (rsSeen.length ? rsSeen.join(' → ') : '(一个都没触发)'));
+      L.push('   onprogress 触发次数: ' + prog +
+             '   已收字节(ev.loaded): ' + lastLoaded);
+      L.push('   xhr.response 非 null: ' + nonNull + ' 次' +
+             '   为 null: ' + isNull + ' 次' +
+             (maxLen ? '（最大 ' + maxLen + ' 字节）' : ''));
+      if (err) L.push({t:'   浏览器报错事件: ' + err, c:'warn'});
+      L.push('');
+      if (nonNull > 0 && maxLen > 0){
+        L.push({t:'   ★ 判定：能流式读 → HTTP 方案可行', c:'ok'});
+      } else if (lastLoaded > 0){
+        L.push({t:'   ★ 判定：字节确实在流入（ev.loaded 在涨），' +
+                   '但 xhr.response 是 null →', c:'no'});
+        L.push({t:'     拿不到数据本身，HTTP + XHR 这条路走不通', c:'no'});
+      } else {
+        L.push({t:'   ★ 判定：完全读不到 → 这条路走不通', c:'no'});
+      }
+      cb(L);
+    }, ms);
+  }
+
+  function step4(){
+    var out = [];
+    // 两路都测：普通 HTTP/1.0 直通 vs HTTP/1.1 + chunked。
+    // 一次对比就能看出「协议版本」是不是决定因素。
+    xhrTest('/live.ts', 'A) 普通响应（HTTP/1.0，无长度）', 3000, function(L1){
+      out = out.concat(L1);
+      out.push('');
+      out.push('--------------------------------------------------');
+      out.push('');
+      xhrTest('/live-chunked', 'B) 分块传输（HTTP/1.1 + chunked）', 3000,
+        function(L2){
+          out = out.concat(L2);
+          sec(4, out);
+        });
+    });
+  }
+
+  // ---------------------------------------------------------- 5 WebSocket
+  // 分两段测：先测「握手通不通」，再测「能不能真收到 TS 流」。
+  // 第二段才是关键 —— mpegts.js 的 websocket-loader 就是把服务端发来的
+  // 二进制帧当 TS 流喂给解码器，帧能到、首字节是 0x47 就说明这条路成立。
+  function wsOpen(url, ms, cb){
+    var L = ['→ ' + url];
+    var t0 = Date.now(), done = false, ws;
+    var frames = 0, bytes = 0, first = -1;
+
+    if (typeof WebSocket === 'undefined'){
+      L.push({t:'   ★ 没有 WebSocket —— 这条路不存在', c:'no'});
+      cb(L); return;
+    }
+    try {
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+    } catch(e){
+      L.push({t:'   ★ 构造失败：' + e, c:'no'});
+      cb(L); return;
+    }
+    ws.onopen = function(){
+      L.push({t:'   握手成功（' + (Date.now()-t0) + ' ms）', c:'ok'});
+      try { ws.send('ping'); } catch(e){}
+    };
+    ws.onmessage = function(ev){
+      var d = ev.data;
+      if (typeof d === 'string'){ L.push('   收到文本消息: ' + d); return; }
+      frames++;
+      bytes += (d.byteLength || 0);
+      if (first < 0 && d.byteLength){
+        try { first = new Uint8Array(d)[0]; } catch(e){}
+      }
+    };
+    ws.onerror = function(){ L.push({t:'   onerror', c:'warn'}); };
+    ws.onclose = function(){};
+    setTimeout(function(){
+      try { ws.close(); } catch(e){}
+      var ok = frames > 0 && first === 0x47;
+      L.push('   帧数=' + frames + '   累计字节=' + bytes +
+             (first >= 0 ? '   首字节=0x' + first.toString(16) : ''));
+      if (ok){
+        L.push({t:'   ★ 首字节 0x47 = TS 同步字节 → 这条路能用',
+                c:'ok'});
+      } else if (frames > 0){
+        L.push({t:'   ★ 收到帧了，但首字节不是 0x47 → 数据可能不对', c:'warn'});
+      } else {
+        L.push({t:'   ★ 一帧都没收到 → 这条路不通', c:'no'});
+      }
+      cb(L);
+    }, ms);
+  }
+
+  function step5(){
+    var out = [];
+    wsOpen('/ws', 1500, function(L1){
+      out = out.concat(L1);
+      out.push('');
+      out.push('--------------------------------------------------');
+      out.push('');
+      wsOpen('/ws-live', 2500, function(L2){
+        out = out.concat(L2);
+        sec(5, out);
+      });
+    });
+  }
+
+  // ---------------------------------------------------------- 6 原生播放器
+  function step6(){
+    var v = document.getElementById('nv');
+    var L = [];
+    var can = {};
+    var M = ['video/mp2t', 'video/mp4; codecs="avc1.42E01E"',
+             'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
+             'application/x-mpegURL', 'application/vnd.apple.mpegurl'];
+    for (var i=0;i<M.length;i++){
+      var r = '';
+      try { r = v.canPlayType(M[i]); } catch(e){ r = '(抛异常)'; }
+      L.push('  canPlayType(' + M[i] + ') = "' + r + '"' +
+             (r === 'probably' || r === 'maybe' ? '   ← 认' : ''));
+    }
+    L.push('');
+    L.push('下面这个播放器试着直接播 /live.ts（原生解码，不用 MSE）。');
+    L.push('如果画面出来了，说明有一条比 mpegts.js 更简单的路。');
+    try { v.src = '/live.ts'; } catch(e){ L.push('  设置 src 失败：' + e); }
+    sec(6, L);
+    setTimeout(function(){
+      L.push('');
+      L.push('3 秒后：readyState=' + v.readyState + '  videoWidth=' +
+             (v.videoWidth||0) + '  videoHeight=' + (v.videoHeight||0) +
+             '  网络状态=' + v.networkState + '  错误码=' + (v.error ? v.error.code : 0));
+      if (v.error && v.error.message) L.push('  错误信息：' + v.error.message);
+      if (v.videoWidth) {
+        L.push({t:'  ★ 原生播放器能解出来 → 这条路能用！', c:'ok'});
+      } else {
+        L.push({t:'  ★ 原生播放器解不出来。', c:'no'});
+      }
+      sec(6, L);
+    }, 3000);
+  }
+
+  // ---------------------------------------------------------- 串起来跑
+  function stat(s){ document.getElementById('stat').textContent = s; }
+  function run(){
+    stat('第 1/6 步 …'); step1();
+    stat('第 2/6 步 …'); var mseOk = step2();
+    stat('第 3/6 步 …'); step3();
+    stat('第 4/6 步 … 正在测流式读取（约 6 秒）'); step4();
+    stat('第 5/6 步 …'); step5();
+    stat('第 6/6 步 …'); step6();
+    setTimeout(function(){
+      stat('跑完了 —— 点右下角「复制全部结果」发回即可。' +
+           (mseOk ? '' : '（注意：第 2 步显示 MSE 全不支持）'));
+    }, 18000);
+  }
+
+  document.getElementById('copy').addEventListener('click', function(){
+    function num(n){ return n + ' · ' + document.querySelector(
+      'section:nth-of-type(' + n + ') h2') .textContent; }
+    var parts = [];
+    for (var n=1;n<=6;n++) parts.push('=== ' + num(n) + ' ===\n' + (ALL[n] || ''));
+    var text = '【电视端能力探测结果】\n' + parts.join('\n\n') + '\n';
+    var btn = this;
+    function flash(msg){ var o = btn.textContent; btn.textContent = msg;
+      setTimeout(function(){ btn.textContent = o; }, 1600); }
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(
+        function(){ flash('已复制 ✓'); },
+        function(){ fallback(); });
+    } else { fallback(); }
+    function fallback(){
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand && document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash(ok ? '已复制 ✓' : '复制失败，请手动截图');
+      } catch(e){ flash('复制失败，请手动截图'); }
+    }
+  });
+
+  if (document.readyState === 'complete') { run(); }
+  else { window.addEventListener('load', run); }
+})();
+</script>
+</body>
+</html>
